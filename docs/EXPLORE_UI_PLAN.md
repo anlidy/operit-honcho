@@ -6,7 +6,8 @@
 
 官方参考：
 
-- [Honcho Dashboard Overview](https://honcho.dev/docs/documentation/dashboard-overview)
+- [Honcho Dashboard documentation](https://honcho.dev/docs/v3/documentation/reference/platform)
+- [Honcho Explore dashboard](https://app.honcho.dev/explore)（需要登录）
 - [Honcho v3 API Reference](https://honcho.dev/docs/v3/api-reference/introduction)
 - 本地 Operit ToolPkg Guide 与 `worldbook.toolpkg` Compose DSL 示例
 
