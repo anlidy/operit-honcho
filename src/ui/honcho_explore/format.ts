@@ -17,7 +17,40 @@ export function compactJson(value: unknown, maximum = 140): string {
 export function displayTime(value: unknown): string {
   const text = String(value == null ? "" : value).trim();
   if (!text) return "时间未知";
-  return text.replace("T", " ").replace(/\.\d+(?=Z|[+-]\d\d:\d\d$)/, "");
+
+  // Honcho timestamps without an explicit offset are interpreted as UTC.
+  const normalized = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/.test(text)
+    ? `${text}Z`
+    : text;
+  const timestamp = Date.parse(normalized);
+  if (!Number.isFinite(timestamp)) return "时间未知";
+
+  try {
+    if (typeof Intl !== "undefined" && typeof Intl.DateTimeFormat === "function") {
+      const parts = new Intl.DateTimeFormat("en-CA", {
+        timeZone: "Asia/Shanghai",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hourCycle: "h23",
+      }).formatToParts(new Date(timestamp));
+      const values: Record<string, string> = {};
+      for (const part of parts) values[part.type] = part.value;
+      if (values.year && values.month && values.day && values.hour && values.minute && values.second) {
+        return `${values.year}-${values.month}-${values.day} ${values.hour}:${values.minute}:${values.second}`;
+      }
+    }
+  } catch (_error) {
+    // QuickJS builds without time-zone data use the deterministic UTC+8 fallback.
+  }
+
+  const shifted = new Date(timestamp + 8 * 60 * 60 * 1000);
+  const number = (input: number): string => String(input).padStart(2, "0");
+  return `${shifted.getUTCFullYear()}-${number(shifted.getUTCMonth() + 1)}-${number(shifted.getUTCDate())} `
+    + `${number(shifted.getUTCHours())}:${number(shifted.getUTCMinutes())}:${number(shifted.getUTCSeconds())}`;
 }
 
 export function pageLabel(page: number, pages: number, total: number): string {

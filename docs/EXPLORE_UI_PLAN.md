@@ -1,6 +1,6 @@
 # Operit Honcho Explore 侧边栏实施计划
 
-状态：**Phase 1 只读基础链路已实现；真实 `test` Workspace 与视觉验收待完成**。
+状态：**Phase 1 只读基础链路已实现；Phase 3 的身份迁移、角色绑定与 Peer 管理切片已实现；真实 `test` Workspace 与视觉验收待完成**。
 
 本文规划在现有 `com.operit.honcho` ToolPkg 内增加 Operit 主侧边栏 Explore 面板，目标是在移动端可用的 Compose DSL 界面中复现 Honcho 官方 Explore 的核心管理和诊断能力。
 
@@ -431,7 +431,10 @@ Compose DSL 没有 React `useEffect` 语义。初次加载采用 `hasLoaded + in
 
 ### Phase 3：受控写操作
 
-- 创建 Peer/Session。
+- 已实现：活跃 Workspace 的旧身份迁移和 User/AI 角色绑定，采用预览 + revision 绑定的单次确认令牌。
+- 已实现：Peer 详情、创建、显示名、归档/恢复、分页 Session 成员关系与移除，以及 observer/target 明确的只读 Peer Card 预览。
+- 已实现：Peer 写操作采用五分钟单次确认令牌，并在提交前检查配置、Workspace、操作参数、metadata 与 Session 成员关系冲突。
+- 创建 Session。
 - Session 添加 Peer、添加测试 Message。
 - Peer Card 编辑。
 - Conclusion 创建和删除。

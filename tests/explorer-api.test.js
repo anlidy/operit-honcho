@@ -85,3 +85,51 @@ test("Honcho HTTP errors retain status for Explorer error mapping", async () => 
     (error) => error instanceof HonchoHttpError && error.status === 403 && /scoped key/.test(error.message)
   );
 });
+
+test("Explorer Peer API maps detail, metadata, sessions, Card, and member removal", async () => {
+  const requests = [];
+  const transport = async (request) => {
+    requests.push(request);
+    if (request.url.includes("/peers/list")) {
+      return { statusCode: 200, content: page([{ id: "peer-1", metadata: { owner: "kept" } }]) };
+    }
+    if (request.method === "POST" && request.url.endsWith("/peers")) {
+      return { statusCode: 200, content: JSON.stringify(request.body) };
+    }
+    if (request.method === "PUT" && request.url.endsWith("/peers/peer-1")) {
+      return { statusCode: 200, content: JSON.stringify({ id: "peer-1", metadata: request.body.metadata }) };
+    }
+    if (request.url.includes("/peers/peer-1/sessions")) {
+      return { statusCode: 200, content: page([{ id: "session-1" }]) };
+    }
+    if (request.method === "GET" && request.url.includes("/peers/observer/card")) {
+      return { statusCode: 200, content: JSON.stringify({ peer_card: ["fact one", "fact two"] }) };
+    }
+    if (request.method === "DELETE" && request.url.endsWith("/sessions/session-1/peers")) {
+      return { statusCode: 200, content: JSON.stringify({ id: "session-1" }) };
+    }
+    return { statusCode: 404, content: "not found" };
+  };
+
+  const api = new HonchoApi(loadConfig(), transport);
+  assert.equal((await api.getPeerReadOnly("space/id", "peer-1")).id, "peer-1");
+  assert.equal((await api.createPeer("space/id", "new-peer", { label: "New" })).id, "new-peer");
+  assert.equal((await api.updatePeerMetadata("space/id", "peer-1", { owner: "kept" })).metadata.owner, "kept");
+  assert.equal((await api.listPeerSessions("space/id", "peer-1", 2, 10, false)).items[0].id, "session-1");
+  assert.deepEqual(await api.getPeerCardReadOnly("space/id", "observer", "peer-1"), ["fact one", "fact two"]);
+  assert.equal((await api.removePeerFromSession("space/id", "session-1", "peer-1")).id, "session-1");
+
+  assert.ok(requests.some((request) => request.method === "POST"
+    && request.url.endsWith("/v3/workspaces/space%2Fid/peers")
+    && request.body.id === "new-peer"));
+  assert.ok(requests.some((request) => request.method === "PUT"
+    && request.url.endsWith("/peers/peer-1")
+    && request.body.metadata.owner === "kept"));
+  assert.ok(requests.some((request) => request.method === "POST"
+    && request.url.includes("/peers/peer-1/sessions?page=2&size=10&reverse=false")));
+  assert.ok(requests.some((request) => request.method === "GET"
+    && request.url.endsWith("/peers/observer/card?target=peer-1")));
+  assert.ok(requests.some((request) => request.method === "DELETE"
+    && request.url.endsWith("/sessions/session-1/peers")
+    && JSON.stringify(request.body) === '["peer-1"]'));
+});

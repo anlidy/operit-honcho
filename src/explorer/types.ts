@@ -1,7 +1,16 @@
 export type ExplorerOperation =
   | "status"
+  | "identity_status"
+  | "prepare_identity_update"
+  | "commit_identity_update"
+  | "queue_status"
   | "list_workspaces"
   | "list_peers"
+  | "get_peer"
+  | "list_peer_sessions"
+  | "get_peer_card"
+  | "prepare_peer_mutation"
+  | "commit_peer_mutation"
   | "list_sessions"
   | "list_messages"
   | "list_conclusions";
@@ -15,6 +24,15 @@ export interface ExplorerRequest {
     size?: number;
     reverse?: boolean;
     sessionId?: string;
+    peerId?: string;
+    observerPeerId?: string;
+    targetPeerId?: string;
+    displayName?: string;
+    archived?: boolean;
+    peerMutation?: PeerMutationKind;
+    userPeerId?: string;
+    aiPeerId?: string;
+    confirmationToken?: string;
   };
 }
 
@@ -53,6 +71,43 @@ export interface PeerDto {
   metadata?: Record<string, unknown>;
   configuration?: Record<string, unknown>;
   created_at?: string;
+  display_name: string;
+  archived: boolean;
+  roles: Array<"user" | "ai">;
+}
+
+export type PeerMutationKind =
+  | "create"
+  | "update_display_name"
+  | "set_archived"
+  | "remove_from_session";
+
+export interface PeerCardDto {
+  workspace_id: string;
+  observer_id: string;
+  target_id: string;
+  peer_card: string[];
+}
+
+export interface PeerMutationPreviewDto {
+  mutation: PeerMutationKind;
+  workspace_id: string;
+  peer_id: string;
+  previous_display_name?: string;
+  proposed_display_name?: string;
+  previous_archived?: boolean;
+  proposed_archived?: boolean;
+  session_id?: string;
+  impact: string;
+  confirmation_token: string;
+  expires_at: string;
+}
+
+export interface PeerMutationResultDto {
+  mutation: PeerMutationKind;
+  peer?: PeerDto;
+  session_id?: string;
+  removed?: boolean;
 }
 
 export interface SessionDto {
@@ -92,6 +147,27 @@ export interface QueueStatusDto {
   pending_work_units: number;
 }
 
+export interface WorkspaceIdentityDto {
+  workspace_id: string;
+  user_peer: string;
+  ai_peer: string;
+  source: "workspace_metadata" | "legacy_config";
+  revision: number;
+  migration_required: boolean;
+}
+
+export interface WorkspaceIdentityUpdatePreviewDto {
+  workspace_id: string;
+  previous_user_peer: string;
+  previous_ai_peer: string;
+  previous_revision: number;
+  proposed_user_peer: string;
+  proposed_ai_peer: string;
+  proposed_revision: number;
+  confirmation_token: string;
+  expires_at: string;
+}
+
 export interface ExplorerStatusDto {
   enabled: boolean;
   configured: boolean;
@@ -100,6 +176,9 @@ export interface ExplorerStatusDto {
   workspace: string;
   user_peer: string;
   ai_peer: string;
+  identity_source: "workspace_metadata" | "legacy_config";
+  identity_revision: number;
+  identity_migration_required: boolean;
   recall_mode: string;
   observation_mode: string;
   session_strategy: string;

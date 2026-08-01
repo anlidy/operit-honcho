@@ -15,8 +15,6 @@
     { "name": "HONCHO_BASE_URL", "description": { "zh": "自托管 Honcho 地址；云端默认 https://api.honcho.dev。", "en": "Self-hosted Honcho URL; cloud defaults to https://api.honcho.dev." }, "required": false },
     { "name": "HONCHO_ENABLED", "description": { "zh": "总开关，true/false。配置 Key 或 Base URL 时默认开启。", "en": "Master toggle, true/false. Auto-enabled when a key or base URL is set." }, "required": false },
     { "name": "HONCHO_WORKSPACE", "description": { "zh": "Honcho workspace ID，默认 operit。", "en": "Honcho workspace ID, default operit." }, "required": false },
-    { "name": "HONCHO_USER_PEER", "description": { "zh": "用户 Peer ID，默认 user。", "en": "User peer ID, default user." }, "required": false },
-    { "name": "HONCHO_AI_PEER", "description": { "zh": "Operit AI Peer ID，默认 operit。", "en": "Operit AI peer ID, default operit." }, "required": false },
     { "name": "HONCHO_RECALL_MODE", "description": { "zh": "hybrid/context/tools，默认 hybrid。", "en": "hybrid/context/tools, default hybrid." }, "required": false },
     { "name": "HONCHO_OBSERVATION_MODE", "description": { "zh": "directional 或 unified，默认 directional。", "en": "directional or unified, default directional." }, "required": false },
     { "name": "HONCHO_SAVE_MESSAGES", "description": { "zh": "是否保存对话消息，默认 true。", "en": "Persist chat messages, default true." }, "required": false },

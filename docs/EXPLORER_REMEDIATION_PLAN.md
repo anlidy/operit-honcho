@@ -1,12 +1,12 @@
 # Honcho Explore 数据一致性与体验修复计划
 
-状态：**方案已确认，尚未开始实现**  
+状态：**正在实施：阶段 C 参与者管理与 Card 已完成实现和自动回归，待真实 `test` Workspace 与真机验收**
 日期：2026-08-01  
 适用范围：`com.operit.honcho` 自动消息持久化、五个 Honcho 工具和 `Honcho 探索` 侧边栏
 
 本文针对真实 `test` Workspace 验收中发现的重复消息、思考/工具中间消息误上传、重复结论、Peer 身份错配、动态记忆破坏提示词前缀缓存、时区错误、缺少筛选与 Peer Card、参与者管理缺失及交互卡顿问题，定义修复边界、数据模型、迁移方式、实施顺序和验收标准。
 
-本轮先完成设计，不在同一变更中修改运行代码或清理线上数据。
+本轮按阶段推进：先阻止新增脏数据，再逐步实现身份、筛选、时间、性能和受控管理能力。每个实现、自动回归和真机验收节点都同步到第 11 节进度快照。
 
 ## 1. 问题确认
 
@@ -20,7 +20,7 @@
 | P1 | 观察方向应按实际 Peer 和名称动态显示 | **部分确认** | UI 已读取每条 Conclusion 的 `observer_id/observed_id`，并非把文字硬编码为 `user -> operit`；但只显示原始 ID，没有显示名解析，工具侧 `observerAndTarget()` 又固定以 AI Peer 为 observer |
 | P1 | Conclusion 缺少 Peer/方向筛选 | **确认** | `list_conclusions` IPC 只有分页参数，API body 固定 `{}`，没有传 `observer_id`、`observed_id` 或 `session_id` filters |
 | P1 | 时间没有转换到上海时区 | **确认** | `displayTime()` 仅替换 ISO 字符串中的 `T`，例如 `04:52Z` 被原样显示，而不是 `Asia/Shanghai` 的 `12:52` |
-| P2 | 参与者页缺少 Peer Card 预览 | **确认** | 当前 `PeerDto` 只有列表字段，没有 Peer detail/Card IPC，也没有观察者与目标选择 |
+| P2 | 参与者页缺少 Peer Card 预览 | **已实现，待真机验收** | 已增加 Peer detail、observer/target 明确的 Card IPC、观察者菜单、空状态和手动刷新 |
 | P2 | Session、Message、Conclusion 加载卡顿 | **确认存在结构性延迟，需增加耗时指标量化** | 每次切页先串行请求 `status`；`status` 又等待远端 queue，再请求列表。已有页面缓存也会在每次切换时强制失效和重载 |
 
 ## 2. 修复原则
@@ -66,13 +66,14 @@ hash(chatId + role + timestamp + completedAt + content)
 生成版本化 `source_key`：
 
 ```text
-operit:v1:<chat-id-hash>:<role>:<sentAt-or-timestamp>:<variant>:<content-hash>:<content-length>
+operit:v1:<chat-id-hash>:<role>:<timestamp-or-sentAt>:<variant>:<content-hash>:<content-length>
 ```
 
 约束：
 
 - 不使用 `completedAt` 作为身份字段。
-- `timestamp` 只在 `sentAt` 缺失时回退。
+- 优先使用宿主消息 `timestamp`；它在同一消息的流式更新、完成更新和指标回写中保持不变。
+- `sentAt` 只在 `timestamp` 缺失时回退，并作为诊断 metadata 单独保存。宿主当前会先以 `sentAt=0` 持久化用户消息，再用真实 `sentAt` 更新同一消息，因此不能把 `sentAt` 作为首选身份字段。
 - 内容先移除 `<memory-context>` 并统一换行，再计算 hash。
 - 每个 Honcho Message 写入 `metadata.operit.source_key`、`metadata.operit.role` 和必要的来源版本；不写模型密钥或完整宿主内部对象。
 - 长消息分块时追加稳定 chunk index，例如 `:chunk:1/3`。
@@ -477,6 +478,28 @@ request(N+1) 历史中 User(N) 的序列化 API 内容
 
 ## 11. 实施顺序
 
+### 当前进度快照（2026-08-01 19:37，Asia/Shanghai）
+
+| 阶段 | 状态 | 已完成 | 下一验收点 |
+| --- | --- | --- | --- |
+| A：阻止新增重复数据 | **主人已确认消息恢复正常，P0 真机主路径通过** | 稳定 `source_key`、Message metadata、最近 100 条 reconcile、未知写入结果保护、结构化移除 thinking/tool/result/status 块、Conclusion 精确幂等、Session-shaped Peer 防误用 | 后续补充重载重放、失败工具与真实变体 fixture，持续观察边界样本 |
+| B：统一 Peer 身份 | **运行时与受控迁移 UI 已实现并完成自动回归** | Workspace `operit_honcho` identity schema；metadata 优先、旧 env 仅迁移回退；15 秒 revision 刷新；main/sandbox 共用 API 解析；custom Peer 只读存在性校验；工具返回 resolved Peer；Explorer identity 状态；活跃 Workspace 迁移/改绑预览；revision 绑定的五分钟单次确认令牌 | 真机确认 main/sandbox/Explorer 一致、迁移确认交互和 Workspace metadata 持久化 |
+| C：参与者管理与 Card | **实现完成并通过自动回归，待真机与真实 API 验收** | Peer 详情；显示名/原始 ID/角色/归档状态；创建、改名、归档/恢复、角色改绑；分页 Peer Session 与成员移除；observer/target Card 预览；活跃 Workspace 写保护；五分钟单次确认；metadata/成员关系并发检查 | 在真实 `test` Workspace 完成创建、改名、角色改绑、归档/恢复、Session 移除、Card 切换和重启持久化验收；检查竖屏/横屏/宽屏布局 |
+| D：Conclusion 方向、筛选与清理 | **未开始，只有创建幂等基础** | 显式创建 Conclusion 已按 observer、observed、Session 和规范化内容查重 | 动态方向显示、服务端筛选、重复报告和确认清理 |
+| E：时间与性能 | **部分实现并完成自动回归** | Prompt sidecar、History/Estimate History/Finalize Hook、重载恢复、TTL/LRU 条数限制、损坏隔离和 fail-open；`Asia/Shanghai` formatter 与 UTC+8 fallback；本地 `status`/远端 `queue_status` 解耦；queue 15 秒缓存和并发合并；非 Overview 列表不再请求 queue | 真机核对上海时间和列表切换延迟；继续实现列表 SWR 缓存、sidecar 总字节上限和清理入口、Provider 重试与 `cachedInputTokens` 验证 |
+
+当前自动化基线：
+
+- `npm test`：41 项全部通过。
+- `npm run pack`：通过，包结构与工具 METADATA 校验通过。
+- `git diff --check`：通过；Honcho Key 模式扫描无命中。
+- 文档计划基线已提交为 `4578c30`；本轮实现和进度同步尚未提交，待真机验收后单独形成实现提交。
+- `skipped_thinking` 和 `skipped_tool` 已覆盖纯内部块；`skipped_variant` 仍需真实变体 Hook fixture。
+- 15:47 真机回归：已安装旧构建仍把流式增长快照、`<think>`、动态 `<tool_SUFFIX>`、`<tool_result_SUFFIX>` 和 `<status>` 上传到 Honcho。源码确认 Operit 将递归工具循环合并进同一 AI 内容流；最新修复只接受 `completedAt > 0` 的最终消息，并在计算来源键和 POST 前按宿主标记结构移除内部块。
+- 16:04 已通过 `debug_install_toolpkg` 安装包含阶段 A P0 修复的构建；安装返回确认 `com.operit.honcho` 与 `honcho` 均为禁用，小幺未执行启用操作。16:16 再次读取设备状态时两者均已启用，视为主人已开始真机测试，不回改该状态。
+- 18:20 已通过 `debug_install_toolpkg` 烧录包含身份迁移 UI、上海时区和 queue 解耦的最新构建；安装包与本地产物 SHA-256 一致。安装使用 `reset_subpackage_states=false`，`com.operit.honcho` 与 `honcho` 均保持禁用，尚未执行真实 API、侧边栏交互或多尺寸视觉验收。
+- 19:37 阶段 C 自动回归：Honcho Peer REST 路径、详情/Card DTO、创建/改名/归档/恢复/Session 移除、活跃角色归档保护、单次确认、并发冲突和详情 UI 均已覆盖；尚未把本次构建烧录到设备，也未执行真实 `test` Workspace 写操作。
+
 ### 阶段 A：阻止新增重复数据
 
 - 捕获完整 Hook 身份字段和复现样本。
@@ -503,6 +526,8 @@ request(N+1) 历史中 User(N) 的序列化 API 内容
 - 全部确认弹窗和写后缓存失效。
 
 完成标志：不修改环境变量即可在 UI 完成角色管理，并且重启后仍保持一致。
+
+实现状态：源码、类型检查和 mocked 自动回归已完成；真实 `test` Workspace 写入、应用重启后的持久化一致性和多尺寸视觉检查尚未完成，因此阶段 C 仍不能标记为真机验收完成。
 
 ### 阶段 D：Conclusion 方向、筛选与清理
 

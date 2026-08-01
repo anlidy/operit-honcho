@@ -1,5 +1,19 @@
 import { HonchoConfig, ReasoningLevel } from "./config";
 import { contentOf, MemoryContext, toStringArray } from "./format";
+import {
+  legacyWorkspaceIdentity,
+  metadataWithWorkspaceIdentity,
+  peerDisplayName,
+  WorkspaceIdentity,
+  workspaceIdentity,
+} from "./identity";
+import {
+  legacyKeysFor,
+  MessageLedger,
+  normalizeMessageContent,
+  PersistedRole,
+  sourceKeyFromMetadata,
+} from "./message";
 
 export type JsonRecord = Record<string, unknown>;
 
@@ -7,7 +21,7 @@ export interface HttpRequest {
   url: string;
   method: "GET" | "POST" | "PUT" | "DELETE";
   headers: Record<string, string>;
-  body?: JsonRecord;
+  body?: object;
 }
 
 export interface HttpResponse {
@@ -77,6 +91,20 @@ export interface Conclusion {
   level?: "explicit" | "deductive" | "inductive" | "contradiction";
   created_at?: string;
 }
+export interface ConclusionCreateResult {
+  created: boolean;
+  conclusion: Conclusion;
+}
+
+export interface ResolvedPeer {
+  id: string;
+  displayName: string;
+}
+
+export interface WorkspaceIdentityStatus extends WorkspaceIdentity {
+  workspaceId: string;
+}
+
 
 export class HonchoHttpError extends Error {
   constructor(
@@ -172,10 +200,15 @@ function pageParams(page: number, size: number, reverse: boolean): Record<string
 
 export class HonchoApi {
   private readonly workspaceId: string;
-  private readonly userPeerId: string;
-  private readonly aiPeerId: string;
+  private userPeerId: string;
+  private aiPeerId: string;
+  private identity: WorkspaceIdentity;
   private workspaceReady = false;
+  private workspaceRefreshAt = 0;
+  private workspacePromise: Promise<void> | null = null;
+  private workspaceMetadata: JsonRecord = {};
   private readonly peersReady = new Set<string>();
+  private readonly peerDetails = new Map<string, HonchoPeer>();
   private readonly sessionsReady = new Set<string>();
 
   constructor(
@@ -183,8 +216,9 @@ export class HonchoApi {
     private readonly transport: HttpTransport = operitHttpTransport
   ) {
     this.workspaceId = sanitizeId(config.workspace, "operit");
-    this.userPeerId = sanitizeId(config.userPeer, "user");
-    this.aiPeerId = sanitizeId(config.aiPeer, "operit");
+    this.identity = legacyWorkspaceIdentity(config.userPeer, config.aiPeer);
+    this.userPeerId = this.identity.userPeerId;
+    this.aiPeerId = this.identity.aiPeerId;
   }
 
   private headers(): Record<string, string> {
@@ -199,7 +233,7 @@ export class HonchoApi {
   private async request<T>(
     method: HttpRequest["method"],
     path: string,
-    body?: JsonRecord
+    body?: object
   ): Promise<T> {
     const response = await this.transport({
       method,
@@ -226,11 +260,16 @@ export class HonchoApi {
     return `/v3/workspaces/${encodeURIComponent(String(workspaceId).trim())}${path}`;
   }
 
-  async listWorkspaces(page = 1, size = 20, reverse = false): Promise<HonchoPage<HonchoWorkspace>> {
+  async listWorkspaces(
+    page = 1,
+    size = 20,
+    reverse = false,
+    filters?: JsonRecord
+  ): Promise<HonchoPage<HonchoWorkspace>> {
     const result = await this.request<unknown>(
       "POST",
       `/v3/workspaces/list${queryString(pageParams(page, size, reverse))}`,
-      {}
+      filters ? { filters } : {}
     );
     return parsePage<HonchoWorkspace>(result);
   }
@@ -239,14 +278,100 @@ export class HonchoApi {
     workspaceId: string,
     page = 1,
     size = 20,
-    reverse = true
+    reverse = true,
+    filters?: JsonRecord
   ): Promise<HonchoPage<HonchoPeer>> {
     const result = await this.request<unknown>(
       "POST",
       `${this.workspacePathFor(workspaceId, "/peers/list")}${queryString(pageParams(page, size, reverse))}`,
-      {}
+      filters ? { filters } : {}
     );
     return parsePage<HonchoPeer>(result);
+  }
+
+  async getPeerReadOnly(workspaceId: string, peerId: string): Promise<HonchoPeer> {
+    const page = await this.listPeers(workspaceId, 1, 2, false, { id: peerId });
+    const peer = page.items.find((item) => item.id === peerId);
+    if (!peer) throw new HonchoHttpError(404, `Peer ${peerId} was not found.`);
+    return peer;
+  }
+
+  async createPeer(
+    workspaceId: string,
+    peerId: string,
+    metadata: JsonRecord = {}
+  ): Promise<HonchoPeer> {
+    const peer = await this.request<HonchoPeer>(
+      "POST",
+      this.workspacePathFor(workspaceId, "/peers"),
+      { id: peerId, metadata }
+    );
+    if (workspaceId === this.workspaceId) this.rememberPeer(peer);
+    return peer;
+  }
+
+  async updatePeerMetadata(
+    workspaceId: string,
+    peerId: string,
+    metadata: JsonRecord
+  ): Promise<HonchoPeer> {
+    const peer = await this.request<HonchoPeer>(
+      "PUT",
+      this.workspacePathFor(workspaceId, `/peers/${encodeURIComponent(peerId)}`),
+      { metadata }
+    );
+    if (workspaceId === this.workspaceId) this.rememberPeer(peer);
+    return peer;
+  }
+
+  async listPeerSessions(
+    workspaceId: string,
+    peerId: string,
+    page = 1,
+    size = 20,
+    reverse = true,
+    filters?: JsonRecord
+  ): Promise<HonchoPage<HonchoSession>> {
+    const path = this.workspacePathFor(
+      workspaceId,
+      `/peers/${encodeURIComponent(peerId)}/sessions`
+    );
+    const result = await this.request<unknown>(
+      "POST",
+      `${path}${queryString(pageParams(page, size, reverse))}`,
+      filters ? { filters } : {}
+    );
+    return parsePage<HonchoSession>(result);
+  }
+
+  async getPeerCardReadOnly(
+    workspaceId: string,
+    observerPeerId: string,
+    targetPeerId: string
+  ): Promise<string[]> {
+    const result = asRecord(await this.request<unknown>(
+      "GET",
+      this.workspacePathFor(
+        workspaceId,
+        `/peers/${encodeURIComponent(observerPeerId)}/card${queryString({ target: targetPeerId })}`
+      )
+    ));
+    return toStringArray(result.peer_card);
+  }
+
+  async removePeerFromSession(
+    workspaceId: string,
+    sessionId: string,
+    peerId: string
+  ): Promise<HonchoSession> {
+    return this.request<HonchoSession>(
+      "DELETE",
+      this.workspacePathFor(
+        workspaceId,
+        `/sessions/${encodeURIComponent(sessionId)}/peers`
+      ),
+      [peerId]
+    );
   }
 
   async listSessions(
@@ -318,29 +443,139 @@ export class HonchoApi {
     };
   }
 
-  async ensureWorkspace(): Promise<void> {
-    if (this.workspaceReady) return;
-    await this.request("POST", "/v3/workspaces", { id: this.workspaceId });
-    await Promise.all([
-      this.request("POST", this.workspacePath("/peers"), { id: this.userPeerId }),
-      this.request("POST", this.workspacePath("/peers"), { id: this.aiPeerId }),
-    ]);
-    this.peersReady.add(this.userPeerId);
-    this.peersReady.add(this.aiPeerId);
-    this.workspaceReady = true;
+  private applyIdentity(next: WorkspaceIdentity): void {
+    const changed = next.revision !== this.identity.revision
+      || next.userPeerId !== this.userPeerId
+      || next.aiPeerId !== this.aiPeerId
+      || next.source !== this.identity.source;
+    this.identity = next;
+    this.userPeerId = next.userPeerId;
+    this.aiPeerId = next.aiPeerId;
+    if (changed) {
+      this.peersReady.clear();
+      this.peerDetails.clear();
+      this.sessionsReady.clear();
+    }
   }
 
-  private async ensurePeer(peerId: string): Promise<void> {
+  private rememberPeer(peer: HonchoPeer): HonchoPeer {
+    this.peersReady.add(peer.id);
+    this.peerDetails.set(peer.id, peer);
+    return peer;
+  }
+
+  private async findPeer(peerId: string): Promise<HonchoPeer | null> {
+    const cached = this.peerDetails.get(peerId);
+    if (cached) return cached;
+    const page = await this.listPeers(this.workspaceId, 1, 2, false, { id: peerId });
+    const peer = page.items.find((item) => item.id === peerId) || null;
+    return peer ? this.rememberPeer(peer) : null;
+  }
+
+  private async requireExistingPeer(peerId: string): Promise<HonchoPeer> {
+    const peer = await this.findPeer(peerId);
+    if (!peer) {
+      throw new Error(`PEER_NOT_FOUND: Peer ${peerId} does not exist in Workspace ${this.workspaceId}.`);
+    }
+    return peer;
+  }
+
+  async getWorkspaceIdentityReadOnly(): Promise<WorkspaceIdentityStatus> {
+    const page = await this.listWorkspaces(1, 2, false, { id: this.workspaceId });
+    const workspace = page.items.find((item) => item.id === this.workspaceId);
+    if (!workspace) {
+      throw new HonchoHttpError(404, `Workspace ${this.workspaceId} was not found.`);
+    }
+    const identity = workspaceIdentity(
+      workspace.metadata,
+      legacyWorkspaceIdentity(this.config.userPeer, this.config.aiPeer)
+    );
+    const [user, ai] = await Promise.all([
+      this.findPeer(identity.userPeerId),
+      this.findPeer(identity.aiPeerId),
+    ]);
+    if (!user || !ai) {
+      throw new Error("INVALID_IDENTITY_METADATA: configured User and AI Peers must already exist.");
+    }
+    return { ...identity, workspaceId: this.workspaceId };
+  }
+
+  async ensureWorkspace(): Promise<void> {
+    if (this.workspaceReady && Date.now() < this.workspaceRefreshAt) return;
+    if (this.workspacePromise) return this.workspacePromise;
+
+    const refresh = async (): Promise<void> => {
+      const workspace = await this.request<HonchoWorkspace>("POST", "/v3/workspaces", { id: this.workspaceId });
+      this.workspaceMetadata = asRecord(workspace?.metadata);
+      const next = workspaceIdentity(
+        this.workspaceMetadata,
+        legacyWorkspaceIdentity(this.config.userPeer, this.config.aiPeer)
+      );
+      this.applyIdentity(next);
+
+      if (next.source === "workspace_metadata") {
+        const [user, ai] = await Promise.all([
+          this.requireExistingPeer(next.userPeerId),
+          this.requireExistingPeer(next.aiPeerId),
+        ]);
+        this.rememberPeer(user);
+        this.rememberPeer(ai);
+      } else {
+        const [user, ai] = await Promise.all([
+          this.request<HonchoPeer>("POST", this.workspacePath("/peers"), { id: next.userPeerId }),
+          this.request<HonchoPeer>("POST", this.workspacePath("/peers"), { id: next.aiPeerId }),
+        ]);
+        this.rememberPeer({ ...user, id: user?.id || next.userPeerId });
+        this.rememberPeer({ ...ai, id: ai?.id || next.aiPeerId });
+      }
+      this.workspaceReady = true;
+      this.workspaceRefreshAt = Date.now() + 15000;
+    };
+
+    this.workspacePromise = refresh();
+    try {
+      await this.workspacePromise;
+    } finally {
+      this.workspacePromise = null;
+    }
+  }
+
+  async getWorkspaceIdentity(): Promise<WorkspaceIdentityStatus> {
     await this.ensureWorkspace();
-    if (this.peersReady.has(peerId)) return;
-    await this.request("POST", this.workspacePath("/peers"), { id: peerId });
-    this.peersReady.add(peerId);
+    return { ...this.identity, workspaceId: this.workspaceId };
+  }
+
+  async setWorkspaceIdentity(userPeerId: string, aiPeerId: string): Promise<WorkspaceIdentityStatus> {
+    await this.ensureWorkspace();
+    const metadata = metadataWithWorkspaceIdentity(
+      this.workspaceMetadata,
+      userPeerId,
+      aiPeerId,
+      this.identity.revision
+    );
+    await Promise.all([
+      this.requireExistingPeer(String(userPeerId).trim()),
+      this.requireExistingPeer(String(aiPeerId).trim()),
+    ]);
+    const workspace = await this.request<HonchoWorkspace>(
+      "PUT",
+      this.workspacePath(),
+      { metadata }
+    );
+    this.workspaceMetadata = asRecord(workspace?.metadata || metadata);
+    this.applyIdentity(workspaceIdentity(
+      this.workspaceMetadata,
+      legacyWorkspaceIdentity(this.config.userPeer, this.config.aiPeer)
+    ));
+    this.workspaceReady = true;
+    this.workspaceRefreshAt = Date.now() + 15000;
+    return { ...this.identity, workspaceId: this.workspaceId };
   }
 
   async ensureSession(chatId: string): Promise<string> {
+    await this.ensureWorkspace();
     const sessionId = sessionIdFor(this.config, chatId);
     if (this.sessionsReady.has(sessionId)) return sessionId;
-    await this.ensureWorkspace();
     await this.request("POST", this.workspacePath("/sessions"), {
       id: sessionId,
       peers: this.observationPeers(),
@@ -353,7 +588,19 @@ export class HonchoApi {
     const value = String(peer || "user").trim().toLowerCase();
     if (value === "user") return this.userPeerId;
     if (value === "ai" || value === "assistant") return this.aiPeerId;
+    if (/^operit_.+_[0-9a-f]{8}$/i.test(String(peer || "").trim())) {
+      throw new Error(
+        "INVALID_PEER_ID: peer looks like an Operit Session ID; pass it as chat_id instead."
+      );
+    }
     return sanitizeId(peer, "peer");
+  }
+
+  async resolvePeerDetails(peer = "user"): Promise<ResolvedPeer> {
+    await this.ensureWorkspace();
+    const id = this.resolvePeer(peer);
+    const detail = await this.requireExistingPeer(id);
+    return { id, displayName: peerDisplayName(detail.metadata) };
   }
 
   private observerAndTarget(peer = "user"): { observer: string; target: string } {
@@ -377,15 +624,68 @@ export class HonchoApi {
     return chunks;
   }
 
-  async addMessage(chatId: string, role: "user" | "assistant", content: string): Promise<number> {
+  async addMessage(
+    chatId: string,
+    role: PersistedRole,
+    content: string,
+    sourceKey = "",
+    source?: { sentAt?: number; variantIndex?: number }
+  ): Promise<number> {
     const sessionId = await this.ensureSession(chatId);
     const peerId = role === "assistant" ? this.aiPeerId : this.userPeerId;
-    const messages = this.chunks(content).map((chunk) => ({ content: chunk, peer_id: peerId }));
+    const chunks = this.chunks(content);
+    const messages = chunks.map((chunk, index) => {
+      const chunkSourceKey = chunks.length > 1
+        ? `${sourceKey}:chunk:${index + 1}/${chunks.length}`
+        : sourceKey;
+      const metadata = sourceKey
+        ? {
+            operit: {
+              schema_version: 1,
+              source_key: chunkSourceKey,
+              source_message_key: sourceKey,
+              role,
+              sent_at: Math.max(0, Math.trunc(Number(source?.sentAt || 0))),
+              variant_index: Math.max(0, Math.trunc(Number(source?.variantIndex || 0))),
+            },
+          }
+        : undefined;
+      return { content: chunk, peer_id: peerId, metadata };
+    });
     if (!messages.length) return 0;
     await this.request("POST", this.workspacePath(`/sessions/${encodeURIComponent(sessionId)}/messages`), {
       messages,
     });
     return messages.length;
+  }
+
+  async getMessageLedger(chatId: string, limit = 100): Promise<MessageLedger> {
+    const sessionId = await this.ensureSession(chatId);
+    const result = await this.listMessages(
+      this.workspaceId,
+      sessionId,
+      1,
+      Math.max(1, Math.min(100, Math.trunc(limit))),
+      true
+    );
+    const sourceKeys = new Set<string>();
+    const legacyKeys = new Set<string>();
+    for (const message of result.items) {
+      const sourceKey = sourceKeyFromMetadata(message.metadata);
+      if (sourceKey) sourceKeys.add(sourceKey);
+
+      const role: PersistedRole | null = message.peer_id === this.aiPeerId
+        ? "assistant"
+        : message.peer_id === this.userPeerId
+          ? "user"
+          : null;
+      const createdAt = Date.parse(String(message.created_at || ""));
+      if (!role || !Number.isFinite(createdAt)) continue;
+      for (const key of legacyKeysFor(role, String(message.content || ""), createdAt)) {
+        legacyKeys.add(key);
+      }
+    }
+    return { sourceKeys: Array.from(sourceKeys), legacyKeys: Array.from(legacyKeys) };
   }
 
   private parseContext(sessionValue: unknown, aiValue: unknown): MemoryContext {
@@ -410,7 +710,7 @@ export class HonchoApi {
   async getContext(chatId: string, query = "", peer = "user"): Promise<MemoryContext> {
     const sessionId = await this.ensureSession(chatId);
     const { observer, target } = this.observerAndTarget(peer);
-    await this.ensurePeer(target);
+    await this.requireExistingPeer(target);
     const sessionPath = this.workspacePath(
       `/sessions/${encodeURIComponent(sessionId)}/context${queryString({
         tokens: this.config.contextTokens,
@@ -433,7 +733,7 @@ export class HonchoApi {
   async getProfile(peer = "user"): Promise<string[]> {
     await this.ensureWorkspace();
     const { observer, target } = this.observerAndTarget(peer);
-    await this.ensurePeer(target);
+    await this.requireExistingPeer(target);
     const result = asRecord(
       await this.request<unknown>(
         "GET",
@@ -446,7 +746,7 @@ export class HonchoApi {
   async setProfile(card: string[], peer = "user"): Promise<string[]> {
     await this.ensureWorkspace();
     const { observer, target } = this.observerAndTarget(peer);
-    await this.ensurePeer(target);
+    await this.requireExistingPeer(target);
     const result = asRecord(
       await this.request<unknown>(
         "PUT",
@@ -460,7 +760,7 @@ export class HonchoApi {
   async search(query: string, maxTokens = 800, peer = "user"): Promise<string> {
     await this.ensureWorkspace();
     const peerId = this.resolvePeer(peer);
-    await this.ensurePeer(peerId);
+    await this.requireExistingPeer(peerId);
     const charBudget = Math.max(200, Math.min(2000, maxTokens) * 4);
     const limit = Math.max(3, Math.min(20, Math.floor(charBudget / 300)));
     const messages = await this.request<HonchoMessage[]>("POST", this.workspacePath("/search"), {
@@ -492,7 +792,7 @@ export class HonchoApi {
   ): Promise<string> {
     const sessionId = await this.ensureSession(chatId);
     const { observer, target } = this.observerAndTarget(peer);
-    await this.ensurePeer(target);
+    await this.requireExistingPeer(target);
     const result = asRecord(
       await this.request<unknown>("POST", this.workspacePath(`/peers/${encodeURIComponent(observer)}/chat`), {
         session_id: sessionId,
@@ -508,7 +808,7 @@ export class HonchoApi {
   async createConclusion(chatId: string, content: string, peer = "user"): Promise<Conclusion[]> {
     const sessionId = await this.ensureSession(chatId);
     const { observer, target } = this.observerAndTarget(peer);
-    await this.ensurePeer(target);
+    await this.requireExistingPeer(target);
     return this.request<Conclusion[]>("POST", this.workspacePath("/conclusions"), {
       conclusions: [{
         content: String(content || "").trim(),
@@ -519,6 +819,45 @@ export class HonchoApi {
     });
   }
 
+  async createConclusionIdempotent(
+    chatId: string,
+    content: string,
+    peer = "user"
+  ): Promise<ConclusionCreateResult> {
+    const cleanContent = normalizeMessageContent(content);
+    const sessionId = await this.ensureSession(chatId);
+    const { observer, target } = this.observerAndTarget(peer);
+    await this.requireExistingPeer(target);
+    const filters = { observer_id: observer, observed_id: target, session_id: sessionId };
+    const page = asRecord(
+      await this.request<unknown>(
+        "POST",
+        this.workspacePath(`/conclusions/list${queryString({ size: 100, reverse: false })}`),
+        { filters }
+      )
+    );
+    const existing = (Array.isArray(page.items) ? page.items : [])
+      .map((item) => asRecord(item) as unknown as Conclusion)
+      .find((item) => normalizeMessageContent(item.content) === cleanContent);
+    if (existing) return { created: false, conclusion: existing };
+
+    const created = await this.request<Conclusion[]>(
+      "POST",
+      this.workspacePath("/conclusions"),
+      {
+        conclusions: [{
+          content: cleanContent,
+          observer_id: observer,
+          observed_id: target,
+          session_id: sessionId,
+        }],
+      }
+    );
+    const conclusion = created?.[0];
+    if (!conclusion) throw new Error("Honcho did not return the created conclusion.");
+    return { created: true, conclusion };
+  }
+
   async deleteConclusion(id: string): Promise<void> {
     await this.ensureWorkspace();
     await this.request<void>("DELETE", this.workspacePath(`/conclusions/${encodeURIComponent(id)}`));
@@ -527,7 +866,7 @@ export class HonchoApi {
   async listConclusions(query = "", peer = "user", limit = 20): Promise<Conclusion[]> {
     await this.ensureWorkspace();
     const { observer, target } = this.observerAndTarget(peer);
-    await this.ensurePeer(target);
+    await this.requireExistingPeer(target);
     const filters = { observer_id: observer, observed_id: target };
     if (query.trim()) {
       return this.request<Conclusion[]>("POST", this.workspacePath("/conclusions/query"), {
@@ -557,6 +896,9 @@ export class HonchoApi {
       workspace: this.workspaceId,
       user_peer: this.userPeerId,
       ai_peer: this.aiPeerId,
+      identity_source: this.identity.source,
+      identity_revision: this.identity.revision,
+      identity_migration_required: this.identity.migrationRequired,
       recall_mode: this.config.recallMode,
       observation_mode: this.config.observationMode,
       session_strategy: this.config.sessionStrategy,

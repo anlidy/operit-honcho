@@ -1,10 +1,12 @@
 import { ExplorerService } from "./explorer/service";
 import { ExplorerResponse } from "./explorer/types";
 import { honchoController } from "./runtime";
+import { createToolPkgPromptSidecarStore, PromptSidecarStore } from "./prompt_sidecar";
 import honchoExploreScreen from "./ui/honcho_explore/index.ui.js";
 
 const HONCHO_EXPLORE_ROUTE = "toolpkg:com.operit.honcho:ui:honcho_explore";
 const explorerService = new ExplorerService(honchoController);
+let promptSidecars: PromptSidecarStore | null = null;
 
 // IPC handlers must be registered in the persistent manifest.main context.
 ToolPkg.ipc.on("honcho.explorer.request", onExplorerRequest);
@@ -12,6 +14,11 @@ ToolPkg.ipc.on("honcho.explorer.request", onExplorerRequest);
 function isChatPrompt(payload: ToolPkg.PromptHookEventPayload): boolean {
   const value = String(payload.promptFunctionType || payload.functionType || "CHAT").toUpperCase();
   return value === "CHAT";
+}
+
+function sidecars(): PromptSidecarStore {
+  if (!promptSidecars) promptSidecars = createToolPkgPromptSidecarStore();
+  return promptSidecars;
 }
 
 export function registerToolPkg(): boolean {
@@ -38,6 +45,14 @@ export function registerToolPkg(): boolean {
     id: "honcho_mode_header",
     function: onSystemPromptCompose,
   });
+  ToolPkg.registerPromptHistoryHook({
+    id: "honcho_restore_memory_history",
+    function: onPromptHistory,
+  });
+  ToolPkg.registerPromptEstimateHistoryHook({
+    id: "honcho_restore_memory_estimate_history",
+    function: onPromptEstimateHistory,
+  });
   ToolPkg.registerPromptFinalizeHook({
     id: "honcho_memory_context",
     function: onPromptFinalize,
@@ -48,6 +63,32 @@ export function registerToolPkg(): boolean {
     function: onApplicationTerminate,
   });
   return true;
+}
+
+async function restorePromptHistory(
+  event: ToolPkg.PromptHistoryHookEvent | ToolPkg.PromptEstimateHistoryHookEvent
+): Promise<ToolPkg.PromptHookObjectResult | null> {
+  const payload = event.eventPayload;
+  const stage = String(payload.stage || event.eventName || "");
+  if (stage !== "after_prepare_history" || !isChatPrompt(payload)) return null;
+  const chatId = String(payload.chatId || "").trim();
+  const history = payload.preparedHistory;
+  if (!chatId || !Array.isArray(history) || !history.length) return null;
+
+  const restored = await sidecars().restoreHistory(chatId, history);
+  return { preparedHistory: restored as ToolPkg.PromptTurn[] };
+}
+
+export function onPromptHistory(
+  event: ToolPkg.PromptHistoryHookEvent
+): Promise<ToolPkg.PromptHookObjectResult | null> {
+  return restorePromptHistory(event);
+}
+
+export function onPromptEstimateHistory(
+  event: ToolPkg.PromptEstimateHistoryHookEvent
+): Promise<ToolPkg.PromptHookObjectResult | null> {
+  return restorePromptHistory(event);
 }
 
 export async function onExplorerRequest(payload: unknown): Promise<ExplorerResponse> {
@@ -64,6 +105,15 @@ export function onChatMessage(event: ToolPkg.ChatMessageHookEvent): null {
     roleName: payload.roleName,
     content: payload.content,
     completedAt: payload.completedAt,
+    sentAt: payload.sentAt,
+    displayMode: payload.displayMode,
+    selectedVariantIndex: payload.selectedVariantIndex,
+    provider: payload.provider,
+    modelName: payload.modelName,
+    inputTokens: payload.inputTokens,
+    outputTokens: payload.outputTokens,
+    cachedInputTokens: payload.cachedInputTokens,
+    isFavorite: payload.isFavorite,
   });
   return null;
 }
@@ -94,7 +144,12 @@ export async function onPromptFinalize(
   if (!input.trim()) return null;
 
   try {
-    const injected = await honchoController.injectForPrompt(chatId, input);
+    const injected = await sidecars().injectCurrent(
+      chatId,
+      (payload.preparedHistory || []) as ToolPkg.PromptTurn[],
+      input,
+      (cleanInput) => honchoController.injectForPrompt(chatId, cleanInput)
+    );
     return injected ? { processedInput: injected } : null;
   } catch (error) {
     console.log(`[honcho] prompt injection failed: ${String(error)}`);

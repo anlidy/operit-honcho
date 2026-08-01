@@ -12,7 +12,14 @@ Operit ToolPkg integration for [Honcho v3](https://honcho.dev), modeled after th
 - Retries failed writes once, retains unsent messages in memory, deduplicates hook replays, and flushes on application termination.
 - Fails open: Honcho outages never block the original Operit conversation.
 - Supports Honcho Cloud and unauthenticated self-hosted deployments.
-- Adds a compact read-only `Honcho Explore` main-sidebar panel for Workspace, Peer, Session, Message, Conclusion, queue, and local write status.
+- Adds a compact `Honcho Explore` main-sidebar panel for Workspace, Peer, Session, Message, Conclusion, local write status, independently cached server queue status, protected identity migration, and controlled Peer management.
+- Uses Workspace `metadata.operit_honcho` as the shared User/AI Peer identity source for automatic hooks, sandbox tools, and Explorer, with a 15-second revision refresh.
+- Treats legacy `HONCHO_USER_PEER` and `HONCHO_AI_PEER` values only as migration fallbacks when Workspace identity metadata is absent.
+- Provides a protected Explorer flow to migrate legacy bindings or change User/AI roles. Every write requires a revision-bound, five-minute, single-use confirmation.
+- Provides Peer detail, display names, archive state, paged Session membership, and directional Peer Card previews. Peer IDs remain immutable and archive/remove actions never claim to delete remote history.
+- Protects Peer creation, display-name changes, archive/restore, role changes, and Session removal with five-minute single-use previews restricted to the active Hook Workspace.
+- Requires custom tool Peer IDs to already exist and reports `resolved_peer_id` plus the configured display name in tool responses.
+- Formats Honcho timestamps for `Asia/Shanghai`, with a deterministic UTC+8 fallback when the runtime lacks time-zone data.
 - Uses a fixed, validated IPC operation allowlist so the UI never receives the API key or constructs Honcho HTTP requests.
 
 ## Documentation
@@ -75,8 +82,6 @@ A configured API key or explicit base URL enables the integration automatically 
 | `HONCHO_API_KEY` | empty | Bearer token for Honcho Cloud. |
 | `HONCHO_BASE_URL` | `https://api.honcho.dev` | Explicit value also enables self-hosted mode. |
 | `HONCHO_WORKSPACE` | `operit` | Workspace ID. |
-| `HONCHO_USER_PEER` | `user` | Stable user peer ID. |
-| `HONCHO_AI_PEER` | `operit` | Stable Operit AI peer ID. |
 | `HONCHO_RECALL_MODE` | `hybrid` | `hybrid`, `context`, or `tools`. |
 | `HONCHO_OBSERVATION_MODE` | `directional` | `directional` or `unified`. |
 | `HONCHO_SAVE_MESSAGES` | `true` | Persist completed chat messages. |
@@ -88,6 +93,8 @@ A configured API key or explicit base URL enables the integration automatically 
 | `HONCHO_DIALECTIC_MAX_CHARS` | `600` | Automatic dialectic injection cap. |
 | `HONCHO_MESSAGE_MAX_CHARS` | `25000` | Maximum message chunk size. |
 | `HONCHO_INJECTION_FREQUENCY` | `every-turn` | `every-turn` or `first-turn`. |
+
+Legacy `HONCHO_USER_PEER` and `HONCHO_AI_PEER` values are still read when the active Workspace has no `metadata.operit_honcho` identity block. They are migration inputs, not the long-term identity source, and are intentionally no longer advertised as package settings.
 
 `context` mode disables automatic tool guidance and uses context injection only, while the installed ToolPkg subpackage remains visible in Operit's package registry. `tools` mode skips all automatic context calls. `hybrid` enables both behaviors.
 
@@ -110,4 +117,4 @@ npm test
 npm run pack
 ```
 
-Tests use a mocked Honcho transport and cover configuration, formatting, ID limits, REST request mapping, chunking, prompt injection, deduplication, retry retention, custom peer creation, and hook registration.
+Tests use a mocked Honcho transport and cover configuration, formatting, ID limits, REST request mapping, chunking, prompt injection, deduplication, retry retention, custom Peer existence validation, protected identity updates, and Hook registration.

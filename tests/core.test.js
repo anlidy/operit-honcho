@@ -20,6 +20,11 @@ const { loadConfig, isConfigured } = require("../dist/config");
 const { HonchoApi, sanitizeId, sessionIdFor } = require("../dist/api");
 const { HonchoController, resolveRole } = require("../dist/controller");
 const {
+  legacyWorkspaceIdentity,
+  metadataWithWorkspaceIdentity,
+  workspaceIdentity,
+} = require("../dist/identity");
+const {
   formatMemoryContext,
   injectMemoryContext,
   sanitizeMemoryContext,
@@ -57,6 +62,94 @@ test("IDs are valid, deterministic, and capped at Honcho's 100 character limit",
   assert.equal(sanitizeId(" a peer/id ", "peer"), "a_peer_id");
 });
 
+test("workspace identity metadata overrides legacy config and preserves unrelated metadata", () => {
+  const legacy = legacyWorkspaceIdentity("legacy user", "legacy ai");
+  assert.equal(legacy.source, "legacy_config");
+  assert.equal(legacy.migrationRequired, true);
+
+  const metadata = metadataWithWorkspaceIdentity({ owner: "kept" }, "primary_user", "primary_ai", 2);
+  const resolved = workspaceIdentity(metadata, legacy);
+  assert.equal(metadata.owner, "kept");
+  assert.equal(resolved.userPeerId, "primary_user");
+  assert.equal(resolved.aiPeerId, "primary_ai");
+  assert.equal(resolved.revision, 3);
+  assert.equal(resolved.source, "workspace_metadata");
+  assert.equal(resolved.migrationRequired, false);
+  assert.throws(
+    () => metadataWithWorkspaceIdentity({}, "same", "same", 0),
+    /must be different/
+  );
+});
+
+test("REST identity resolution validates metadata peers and never creates custom peers", async () => {
+  configure({ HONCHO_USER_PEER: "legacy_user", HONCHO_AI_PEER: "legacy_ai" });
+  const requests = [];
+  let workspaceMetadata = {
+    owner: "kept",
+    operit_honcho: {
+      schema_version: 1,
+      revision: 4,
+      active_user_peer_id: "primary_user",
+      active_ai_peer_id: "primary_ai",
+    },
+  };
+  const peerMetadata = {
+    primary_user: { operit_honcho: { display_name: "Owner" } },
+    primary_ai: { operit_honcho: { display_name: "Assistant" } },
+    next_user: { operit_honcho: { display_name: "Next Owner" } },
+    next_ai: { operit_honcho: { display_name: "Next Assistant" } },
+  };
+  const transport = async (request) => {
+    requests.push(request);
+    if (request.method === "POST" && request.url.includes("/v3/workspaces/list")) {
+      return {
+        statusCode: 200,
+        content: JSON.stringify({ items: [{ id: "operit", metadata: workspaceMetadata }], total: 1, page: 1, size: 2, pages: 1 }),
+      };
+    }
+    if (request.method === "POST" && request.url.endsWith("/v3/workspaces")) {
+      return { statusCode: 200, content: JSON.stringify({ id: "operit", metadata: workspaceMetadata }) };
+    }
+    if (request.method === "POST" && request.url.includes("/peers/list")) {
+      const id = request.body?.filters?.id;
+      const items = peerMetadata[id] ? [{ id, metadata: peerMetadata[id] }] : [];
+      return {
+        statusCode: 200,
+        content: JSON.stringify({ items, total: items.length, page: 1, size: 2, pages: items.length ? 1 : 0 }),
+      };
+    }
+    if (request.method === "PUT" && request.url.endsWith("/v3/workspaces/operit")) {
+      workspaceMetadata = request.body.metadata;
+      return { statusCode: 200, content: JSON.stringify({ id: "operit", metadata: workspaceMetadata }) };
+    }
+    return { statusCode: 200, content: "{}" };
+  };
+
+  const api = new HonchoApi(loadConfig(), transport);
+  const identity = await api.getWorkspaceIdentity();
+  assert.equal(identity.userPeerId, "primary_user");
+  assert.equal(identity.aiPeerId, "primary_ai");
+  assert.equal(identity.revision, 4);
+  assert.deepEqual(await api.resolvePeerDetails("user"), { id: "primary_user", displayName: "Owner" });
+  const requestCount = requests.length;
+  const readOnlyIdentity = await api.getWorkspaceIdentityReadOnly();
+  assert.equal(readOnlyIdentity.revision, 4);
+  assert.equal(
+    requests.slice(requestCount).some((request) => request.url.endsWith("/v3/workspaces")),
+    false
+  );
+  await assert.rejects(() => api.resolvePeerDetails("missing_peer"), /PEER_NOT_FOUND/);
+  assert.equal(
+    requests.some((request) => request.url.endsWith("/peers") && request.body?.id === "missing_peer"),
+    false
+  );
+
+  const updated = await api.setWorkspaceIdentity("next_user", "next_ai");
+  assert.equal(updated.revision, 5);
+  assert.equal(updated.userPeerId, "next_user");
+  assert.equal(workspaceMetadata.owner, "kept");
+});
+
 test("REST client initializes resources, chunks messages, and maps context", async () => {
   configure({ HONCHO_MESSAGE_MAX_CHARS: "1000" });
   const requests = [];
@@ -80,6 +173,16 @@ test("REST client initializes resources, chunks messages, and maps context", asy
       return {
         statusCode: 200,
         content: JSON.stringify({ representation: "assistant representation", peer_card: ["helpful"] }),
+      };
+    }
+    if (request.method === "POST" && request.url.includes("/peers/list")) {
+      const id = request.body?.filters?.id;
+      const items = id === "custom_peer"
+        ? [{ id: "custom_peer", metadata: { operit_honcho: { display_name: "Custom" } } }]
+        : [];
+      return {
+        statusCode: 200,
+        content: JSON.stringify({ items, total: items.length, page: 1, size: 2, pages: items.length ? 1 : 0 }),
       };
     }
     if (request.method === "POST" && request.url.endsWith("/search")) {
@@ -113,7 +216,8 @@ test("REST client initializes resources, chunks messages, and maps context", asy
   assert.equal(context.recentMessages[1].role, "assistant");
 
   await api.getProfile("custom peer");
-  assert.ok(requests.some((request) => request.method === "POST" && request.body?.id === "custom_peer"));
+  assert.ok(requests.some((request) => request.url.includes("/peers/list") && request.body?.filters?.id === "custom_peer"));
+  assert.equal(requests.some((request) => request.url.endsWith("/peers") && request.body?.id === "custom_peer"), false);
 
   const searchResult = await api.search("memory query", 400, "custom peer");
   const searchRequest = requests.find((request) => request.url.endsWith("/search"));
@@ -129,13 +233,28 @@ class FakeApi {
     this.failWrites = 0;
   }
 
-  async addMessage(chatId, role, content) {
+  async resolvePeerDetails(peer) {
+    return { id: peer === "user" ? "primary_user" : peer, displayName: "Owner" };
+  }
+
+  async search() {
+    return "matching memory";
+  }
+
+  async addMessage(chatId, role, content, sourceKey) {
     if (this.failWrites > 0) {
       this.failWrites -= 1;
       throw new Error("temporary failure");
     }
-    this.messages.push({ chatId, role, content });
+    this.messages.push({ chatId, role, content, sourceKey });
     return 1;
+  }
+
+  async getMessageLedger() {
+    return {
+      sourceKeys: this.messages.map((message) => message.sourceKey).filter(Boolean),
+      legacyKeys: [],
+    };
   }
 
   async getContext() {
@@ -182,6 +301,15 @@ test("controller injects context, resolves roles, and deduplicates persisted mes
   assert.equal(fake.messages[0].content, "Continue the project");
 });
 
+test("controller tool responses report the resolved Workspace peer", async () => {
+  configure();
+  const controller = new HonchoController(() => new FakeApi());
+  const result = await controller.call("search", { query: "memory", peer: "user" });
+  assert.equal(result.resolved_peer_id, "primary_user");
+  assert.equal(result.resolved_peer_name, "Owner");
+  assert.equal(result.result, "matching memory");
+});
+
 test("failed writes remain queued and can be retried without blocking later messages", async () => {
   configure();
   const fake = new FakeApi();
@@ -203,6 +331,8 @@ test("failed writes remain queued and can be retried without blocking later mess
     roleName: "assistant",
     content: "second",
     timestamp: 2,
+    completedAt: 3,
+    displayMode: "NORMAL",
   });
   await controller.flushAll();
   status = await controller.call("status", {});
@@ -226,6 +356,8 @@ test("ToolPkg main registers IPC at module load and installs hooks without rebin
     registerUiRoute: (definition) => { registered.ui = definition; },
     registerNavigationEntry: (definition) => { registered.navigation = definition; },
     registerChatMessageHook: (definition) => { registered.chat = definition; },
+    registerPromptHistoryHook: (definition) => { registered.history = definition; },
+    registerPromptEstimateHistoryHook: (definition) => { registered.estimateHistory = definition; },
     registerSystemPromptComposeHook: (definition) => { registered.system = definition; },
     registerPromptFinalizeHook: (definition) => { registered.finalize = definition; },
     registerAppLifecycleHook: (definition) => { registered.lifecycle = definition; },
@@ -243,6 +375,8 @@ test("ToolPkg main registers IPC at module load and installs hooks without rebin
   assert.equal(main.registerToolPkg(), true);
   assert.equal(ipcRegistrations, 1);
   assert.equal(registered.chat.id, "honcho_message_persisted");
+  assert.equal(registered.history.id, "honcho_restore_memory_history");
+  assert.equal(registered.estimateHistory.id, "honcho_restore_memory_estimate_history");
   assert.equal(registered.finalize.id, "honcho_memory_context");
   assert.equal(registered.lifecycle.event, "application_on_terminate");
   assert.equal(registered.ipc.channel, "honcho.explorer.request");

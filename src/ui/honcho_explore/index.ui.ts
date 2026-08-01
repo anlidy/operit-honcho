@@ -7,11 +7,20 @@ import type {
   ExplorerResponse,
   ExplorerStatusDto,
   MessageDto,
+  PeerCardDto,
   PeerDto,
+  PeerMutationKind,
+  PeerMutationPreviewDto,
+  PeerMutationResultDto,
+  QueueStatusDto,
   SessionDto,
   WorkspaceDto,
+  WorkspaceIdentityDto,
+  WorkspaceIdentityUpdatePreviewDto,
 } from "../../explorer/types";
 import { clipText, compactJson, displayTime, pageLabel } from "./format";
+import { renderIdentityManager } from "./identity.ui.js";
+import { renderPeerWorkspace } from "./peers.ui.js";
 
 type ExplorerTab = "overview" | "peers" | "sessions" | "conclusions";
 
@@ -67,6 +76,15 @@ function errorTitle(code: string): string {
     NETWORK_ERROR: "网络连接失败",
     INVALID_REQUEST: "请求参数无效",
     IPC_UNAVAILABLE: "服务尚未就绪",
+    ACTIVE_WORKSPACE_REQUIRED: "只能修改活跃工作区",
+    PEER_NOT_FOUND: "参与者不存在",
+    CONFIRMATION_REQUIRED: "需要重新确认",
+    CONFIRMATION_MISMATCH: "确认内容不匹配",
+    IDENTITY_CONFLICT: "身份绑定已变化",
+    PEER_ALREADY_EXISTS: "参与者已存在",
+    PEER_SESSION_NOT_FOUND: "会话成员关系不存在",
+    ACTIVE_PEER_ARCHIVE_FORBIDDEN: "活跃角色不能归档",
+    PEER_CONFLICT: "参与者资料已变化",
     STALE_RESPONSE: "响应已过期",
     EXPLORER_ERROR: "加载失败",
   };
@@ -96,12 +114,43 @@ export default function honchoExploreScreen(ctx: ComposeDslContext): ComposeNode
   const colors = ctx.MaterialTheme.colorScheme;
   const [tab, setTab] = ctx.useState<ExplorerTab>("tab", "overview");
   const [status, setStatus] = ctx.useState<ExplorerStatusDto | null>("status", null);
+  const [identity, setIdentity] = ctx.useState<WorkspaceIdentityDto | null>("identity", null);
+  const [identityUserPeer, setIdentityUserPeer] = ctx.useState("identityUserPeer", "");
+  const [identityAiPeer, setIdentityAiPeer] = ctx.useState("identityAiPeer", "");
+  const [identityPreview, setIdentityPreview] = ctx.useState<WorkspaceIdentityUpdatePreviewDto | null>(
+    "identityPreview",
+    null
+  );
+  const [identityBusy, setIdentityBusy] = ctx.useState("identityBusy", false);
+  const [identityNotice, setIdentityNotice] = ctx.useState("identityNotice", "");
+  const [identityError, setIdentityError] = ctx.useState("identityError", "");
   const [browsingWorkspace, setBrowsingWorkspace] = ctx.useState("browsingWorkspace", "");
   const [workspaces, setWorkspaces] = ctx.useState<ExplorerPage<WorkspaceDto>>(
     "workspaces",
     emptyPage<WorkspaceDto>()
   );
   const [peers, setPeers] = ctx.useState<ExplorerPage<PeerDto>>("peers", emptyPage<PeerDto>());
+  const [selectedPeer, setSelectedPeer] = ctx.useState<PeerDto | null>("selectedPeer", null);
+  const [peerSessions, setPeerSessions] = ctx.useState<ExplorerPage<SessionDto>>(
+    "peerSessions",
+    emptyPage<SessionDto>()
+  );
+  const [peerCard, setPeerCard] = ctx.useState<PeerCardDto | null>("peerCard", null);
+  const [peerCardObserver, setPeerCardObserver] = ctx.useState("peerCardObserver", "");
+  const [peerObserverMenuOpen, setPeerObserverMenuOpen] = ctx.useState("peerObserverMenuOpen", false);
+  const [showArchivedPeers, setShowArchivedPeers] = ctx.useState("showArchivedPeers", false);
+  const [peerCreateOpen, setPeerCreateOpen] = ctx.useState("peerCreateOpen", false);
+  const [peerCreateId, setPeerCreateId] = ctx.useState("peerCreateId", "");
+  const [peerCreateDisplayName, setPeerCreateDisplayName] = ctx.useState("peerCreateDisplayName", "");
+  const [peerEditDisplayName, setPeerEditDisplayName] = ctx.useState("peerEditDisplayName", "");
+  const [peerMutationPreview, setPeerMutationPreview] = ctx.useState<PeerMutationPreviewDto | null>(
+    "peerMutationPreview",
+    null
+  );
+  const [peerBusy, setPeerBusy] = ctx.useState("peerBusy", false);
+  const [peerNotice, setPeerNotice] = ctx.useState("peerNotice", "");
+  const [peerError, setPeerError] = ctx.useState("peerError", "");
+  const [peerCardError, setPeerCardError] = ctx.useState("peerCardError", "");
   const [sessions, setSessions] = ctx.useState<ExplorerPage<SessionDto>>(
     "sessions",
     emptyPage<SessionDto>()
@@ -126,7 +175,21 @@ export default function honchoExploreScreen(ctx: ComposeDslContext): ComposeNode
   async function remote<T>(
     op: ExplorerOperation,
     workspaceId?: string,
-    params?: { page?: number; size?: number; reverse?: boolean; sessionId?: string }
+    params?: {
+      page?: number;
+      size?: number;
+      reverse?: boolean;
+      sessionId?: string;
+      peerId?: string;
+      observerPeerId?: string;
+      targetPeerId?: string;
+      displayName?: string;
+      archived?: boolean;
+      peerMutation?: PeerMutationKind;
+      userPeerId?: string;
+      aiPeerId?: string;
+      confirmationToken?: string;
+    }
   ): Promise<T> {
     requestSequence.current += 1;
     const requestId = `explore-${Date.now()}-${requestSequence.current}`;
@@ -163,6 +226,8 @@ export default function honchoExploreScreen(ctx: ComposeDslContext): ComposeNode
 
       if (targetTab === "overview") {
         const results = await Promise.allSettled([
+          remote<WorkspaceIdentityDto>("identity_status"),
+          remote<QueueStatusDto>("queue_status", targetWorkspace),
           remote<ExplorerPage<WorkspaceDto>>("list_workspaces", undefined, { page: 1, size: 20 }),
           remote<ExplorerPage<PeerDto>>("list_peers", targetWorkspace, { page: 1, size: 5, reverse: true }),
           remote<ExplorerPage<SessionDto>>("list_sessions", targetWorkspace, {
@@ -172,10 +237,36 @@ export default function honchoExploreScreen(ctx: ComposeDslContext): ComposeNode
           }),
         ]);
         if (version !== loadVersion.current) return;
-        if (results[0].status === "fulfilled") setWorkspaces(results[0].value);
-        if (results[1].status === "fulfilled") setPeers(results[1].value);
-        if (results[2].status === "fulfilled") setSessions(results[2].value);
-        const failures = results
+        const identityResult = results[0] as PromiseSettledResult<WorkspaceIdentityDto>;
+        const queueResult = results[1] as PromiseSettledResult<QueueStatusDto>;
+        const workspaceResult = results[2] as PromiseSettledResult<ExplorerPage<WorkspaceDto>>;
+        const peerResult = results[3] as PromiseSettledResult<ExplorerPage<PeerDto>>;
+        const sessionResult = results[4] as PromiseSettledResult<ExplorerPage<SessionDto>>;
+        const nextStatusWithQueue: ExplorerStatusDto = { ...nextStatus };
+        if (identityResult.status === "fulfilled") {
+          setIdentity(identityResult.value);
+          setIdentityUserPeer(identityResult.value.user_peer);
+          setIdentityAiPeer(identityResult.value.ai_peer);
+          setIdentityPreview(null);
+          setIdentityError("");
+          nextStatusWithQueue.user_peer = identityResult.value.user_peer;
+          nextStatusWithQueue.ai_peer = identityResult.value.ai_peer;
+          nextStatusWithQueue.identity_source = identityResult.value.source;
+          nextStatusWithQueue.identity_revision = identityResult.value.revision;
+          nextStatusWithQueue.identity_migration_required = identityResult.value.migration_required;
+        } else {
+          setIdentityError(uiError(identityResult.reason).message);
+        }
+        if (queueResult.status === "fulfilled") {
+          nextStatusWithQueue.server_queue = queueResult.value;
+        } else {
+          nextStatusWithQueue.server_queue_error = uiError(queueResult.reason);
+        }
+        setStatus(nextStatusWithQueue);
+        if (workspaceResult.status === "fulfilled") setWorkspaces(workspaceResult.value);
+        if (peerResult.status === "fulfilled") setPeers(peerResult.value);
+        if (sessionResult.status === "fulfilled") setSessions(sessionResult.value);
+        const failures = [identityResult, workspaceResult, peerResult, sessionResult]
           .filter((result) => result.status === "rejected")
           .map((result) => uiError((result as PromiseRejectedResult).reason));
         if (failures.length) {
@@ -184,7 +275,24 @@ export default function honchoExploreScreen(ctx: ComposeDslContext): ComposeNode
             : "部分概览数据加载失败。");
         }
       } else if (targetTab === "peers") {
-        setPeers(await remote("list_peers", targetWorkspace, { page, size: 20, reverse: true }));
+        const peerPage = await remote<ExplorerPage<PeerDto>>(
+          "list_peers",
+          targetWorkspace,
+          { page, size: 20, reverse: true }
+        );
+        setPeers(peerPage);
+        if (targetWorkspace === nextStatus.workspace) {
+          try {
+            const nextIdentity = await remote<WorkspaceIdentityDto>("identity_status");
+            if (version !== loadVersion.current) return;
+            setIdentity(nextIdentity);
+            setIdentityUserPeer(nextIdentity.user_peer);
+            setIdentityAiPeer(nextIdentity.ai_peer);
+            if (!peerCardObserver) setPeerCardObserver(nextIdentity.ai_peer);
+          } catch (identityFailure) {
+            setPeerError(uiError(identityFailure).message);
+          }
+        }
       } else if (targetTab === "sessions") {
         setSessions(await remote("list_sessions", targetWorkspace, { page, size: 20, reverse: true }));
       } else {
@@ -244,11 +352,19 @@ export default function honchoExploreScreen(ctx: ComposeDslContext): ComposeNode
       return loadMessages(selectedSessionId, messages.page || 1);
     }
     if (nextTab !== "sessions") setSelectedSessionId("");
+    if (nextTab !== "peers") {
+      setSelectedPeer(null);
+      setPeerMutationPreview(null);
+      setIdentityPreview(null);
+    }
     return load(nextTab, browsingWorkspace, 1);
   }
 
   function selectWorkspace(workspaceId: string): Promise<void> {
     setSelectedSessionId("");
+    setSelectedPeer(null);
+    setPeerMutationPreview(null);
+    setIdentityPreview(null);
     setBrowsingWorkspace(workspaceId);
     return load(tab, workspaceId, 1);
   }
@@ -262,6 +378,263 @@ export default function honchoExploreScreen(ctx: ComposeDslContext): ComposeNode
   function closeSession(): Promise<void> {
     setSelectedSessionId("");
     return load("sessions", browsingWorkspace, sessions.page || 1);
+  }
+
+  async function refreshPeerCard(observerId = peerCardObserver): Promise<void> {
+    if (!selectedPeer || !observerId) return;
+    setPeerBusy(true);
+    setPeerCardError("");
+    try {
+      const value = await remote<PeerCardDto>("get_peer_card", browsingWorkspace, {
+        observerPeerId: observerId,
+        targetPeerId: selectedPeer.id,
+      });
+      setPeerCardObserver(observerId);
+      setPeerCard(value);
+    } catch (caught) {
+      setPeerCard(null);
+      setPeerCardError(uiError(caught).message);
+    } finally {
+      setPeerBusy(false);
+    }
+  }
+
+  async function loadPeerDetail(peerId: string, observerOverride = "", sessionPage = 1): Promise<void> {
+    const workspaceId = browsingWorkspace || status?.workspace || "";
+    if (!workspaceId) return;
+    const observerId = observerOverride
+      || peerCardObserver
+      || identity?.ai_peer
+      || status?.ai_peer
+      || "";
+    setPeerBusy(true);
+    setPeerError("");
+    setPeerCardError("");
+    setPeerNotice("");
+    setPeerMutationPreview(null);
+    setIdentityPreview(null);
+    try {
+      const [detail, related] = await Promise.all([
+        remote<PeerDto>("get_peer", workspaceId, { peerId }),
+        remote<ExplorerPage<SessionDto>>("list_peer_sessions", workspaceId, {
+          peerId,
+          page: sessionPage,
+          size: 20,
+          reverse: true,
+        }),
+      ]);
+      setSelectedPeer(detail);
+      setPeerEditDisplayName(detail.display_name);
+      setPeerSessions(related);
+      if (observerId) {
+        setPeerCardObserver(observerId);
+        try {
+          setPeerCard(await remote<PeerCardDto>("get_peer_card", workspaceId, {
+            observerPeerId: observerId,
+            targetPeerId: peerId,
+          }));
+        } catch (cardFailure) {
+          setPeerCard(null);
+          setPeerCardError(uiError(cardFailure).message);
+        }
+      } else {
+        setPeerCard(null);
+        setPeerCardError("当前工作区没有可用的 Card 观察者。");
+      }
+    } catch (caught) {
+      setPeerError(uiError(caught).message);
+    } finally {
+      setPeerBusy(false);
+    }
+  }
+
+  function closePeer(): void {
+    setSelectedPeer(null);
+    setPeerSessions(emptyPage<SessionDto>());
+    setPeerCard(null);
+    setPeerMutationPreview(null);
+    setIdentityPreview(null);
+    setPeerNotice("");
+    setPeerError("");
+    setPeerCardError("");
+  }
+
+  async function preparePeerMutation(
+    mutation: PeerMutationKind,
+    values: { peerId?: string; displayName?: string; archived?: boolean; sessionId?: string } = {}
+  ): Promise<void> {
+    const peerId = values.peerId || selectedPeer?.id || "";
+    setPeerBusy(true);
+    setPeerError("");
+    setPeerNotice("");
+    setIdentityPreview(null);
+    try {
+      setPeerMutationPreview(await remote<PeerMutationPreviewDto>(
+        "prepare_peer_mutation",
+        status?.workspace,
+        {
+          peerMutation: mutation,
+          peerId: peerId.trim(),
+          displayName: values.displayName?.trim(),
+          archived: values.archived,
+          sessionId: values.sessionId,
+        }
+      ));
+    } catch (caught) {
+      setPeerError(uiError(caught).message);
+    } finally {
+      setPeerBusy(false);
+    }
+  }
+
+  async function commitPeerMutation(): Promise<void> {
+    if (!peerMutationPreview || !status) return;
+    const preview = peerMutationPreview;
+    setPeerBusy(true);
+    setPeerError("");
+    setPeerNotice("");
+    try {
+      const result = await remote<PeerMutationResultDto>(
+        "commit_peer_mutation",
+        status.workspace,
+        {
+          peerMutation: preview.mutation,
+          peerId: preview.peer_id,
+          displayName: preview.mutation === "create" || preview.mutation === "update_display_name"
+            ? preview.proposed_display_name
+            : undefined,
+          archived: preview.mutation === "set_archived" ? preview.proposed_archived : undefined,
+          sessionId: preview.session_id,
+          confirmationToken: preview.confirmation_token,
+        }
+      );
+      setPeerMutationPreview(null);
+      setPeerCreateOpen(false);
+      setPeerCreateId("");
+      setPeerCreateDisplayName("");
+      const successNotice = preview.mutation === "remove_from_session"
+        ? "已移除会话成员关系，远端历史数据保持不变。"
+        : "参与者变更已保存。";
+      if (result.peer) {
+        setSelectedPeer(result.peer);
+        setPeerEditDisplayName(result.peer.display_name);
+      }
+      const refreshed = await remote<ExplorerPage<PeerDto>>(
+        "list_peers",
+        status.workspace,
+        { page: peers.page || 1, size: 20, reverse: true }
+      );
+      setPeers(refreshed);
+      await loadPeerDetail(preview.peer_id, peerCardObserver || status.ai_peer);
+      setPeerNotice(successNotice);
+      await ctx.showToast("Honcho 参与者变更已保存");
+    } catch (caught) {
+      setPeerMutationPreview(null);
+      setPeerError(uiError(caught).message);
+    } finally {
+      setPeerBusy(false);
+    }
+  }
+
+  async function preparePeerRole(role: "user" | "ai", peerId: string): Promise<void> {
+    if (!status) return;
+    setPeerBusy(true);
+    setPeerError("");
+    setPeerNotice("");
+    setPeerMutationPreview(null);
+    try {
+      const current = identity || await remote<WorkspaceIdentityDto>("identity_status");
+      const userPeerId = role === "user" ? peerId : current.user_peer;
+      const aiPeerId = role === "ai" ? peerId : current.ai_peer;
+      setIdentityPreview(await remote<WorkspaceIdentityUpdatePreviewDto>(
+        "prepare_identity_update",
+        status.workspace,
+        { userPeerId, aiPeerId }
+      ));
+    } catch (caught) {
+      setPeerError(uiError(caught).message);
+    } finally {
+      setPeerBusy(false);
+    }
+  }
+
+  async function prepareIdentityUpdate(): Promise<void> {
+    if (!status || !identity) return;
+    setIdentityBusy(true);
+    setIdentityError("");
+    setIdentityNotice("");
+    try {
+      const preview = await remote<WorkspaceIdentityUpdatePreviewDto>(
+        "prepare_identity_update",
+        status.workspace,
+        {
+          userPeerId: identityUserPeer.trim(),
+          aiPeerId: identityAiPeer.trim(),
+        }
+      );
+      setIdentityPreview(preview);
+    } catch (caught) {
+      setIdentityError(uiError(caught).message);
+    } finally {
+      setIdentityBusy(false);
+    }
+  }
+
+  async function commitIdentityUpdate(): Promise<void> {
+    if (!status || !identityPreview) return;
+    setIdentityBusy(true);
+    setIdentityError("");
+    setIdentityNotice("");
+    try {
+      const updated = await remote<WorkspaceIdentityDto>(
+        "commit_identity_update",
+        status.workspace,
+        {
+          userPeerId: identityPreview.proposed_user_peer,
+          aiPeerId: identityPreview.proposed_ai_peer,
+          confirmationToken: identityPreview.confirmation_token,
+        }
+      );
+      setIdentity(updated);
+      setIdentityUserPeer(updated.user_peer);
+      setIdentityAiPeer(updated.ai_peer);
+      setIdentityPreview(null);
+      setIdentityNotice("身份绑定已保存。main 与 sandbox 会在下一次刷新窗口内读取新 revision。");
+      setStatus({
+        ...status,
+        user_peer: updated.user_peer,
+        ai_peer: updated.ai_peer,
+        identity_source: updated.source,
+        identity_revision: updated.revision,
+        identity_migration_required: updated.migration_required,
+      });
+      setPeers({
+        ...peers,
+        items: peers.items.map((peer) => ({
+          ...peer,
+          roles: [
+            ...(peer.id === updated.user_peer ? ["user" as const] : []),
+            ...(peer.id === updated.ai_peer ? ["ai" as const] : []),
+          ],
+        })),
+      });
+      if (selectedPeer) {
+        setSelectedPeer({
+          ...selectedPeer,
+          roles: [
+            ...(selectedPeer.id === updated.user_peer ? ["user" as const] : []),
+            ...(selectedPeer.id === updated.ai_peer ? ["ai" as const] : []),
+          ],
+        });
+        setPeerNotice("角色绑定已保存。之后的新消息与工具调用会使用新角色。");
+      }
+      await ctx.showToast("Honcho 身份绑定已保存");
+    } catch (caught) {
+      setIdentityPreview(null);
+      setIdentityError(uiError(caught).message);
+    } finally {
+      setIdentityBusy(false);
+    }
   }
 
   function sectionTitle(title: string, subtitle = ""): ComposeNode {
@@ -421,7 +794,7 @@ export default function honchoExploreScreen(ctx: ComposeDslContext): ComposeNode
         ),
       ]),
       UI.Text({
-        text: `${status.user_peer} → ${status.ai_peer}  ·  ${recallModeLabel(status.recall_mode)}  ·  ${sessionStrategyLabel(status.session_strategy)}`,
+        text: `${status.user_peer} → ${status.ai_peer}  ·  ${status.identity_source === "workspace_metadata" ? `身份 rev ${status.identity_revision}` : "身份待迁移"}  ·  ${recallModeLabel(status.recall_mode)}  ·  ${sessionStrategyLabel(status.session_strategy)}`,
         style: "bodySmall",
         color: colors.onSurfaceVariant,
         maxLines: 2,
@@ -429,6 +802,36 @@ export default function honchoExploreScreen(ctx: ComposeDslContext): ComposeNode
       }),
       sectionTitle("工作区", `当前密钥可见 ${workspaces.total} 个`),
     ];
+
+    nodes.splice(nodes.length - 1, 0, renderIdentityManager(ctx, {
+      identity,
+      activeWorkspace: status.workspace,
+      browsingWorkspace,
+      userPeerId: identityUserPeer,
+      aiPeerId: identityAiPeer,
+      preview: identityPreview,
+      busy: identityBusy,
+      notice: identityNotice,
+      error: identityError,
+      onUserPeerChange: (value) => {
+        setIdentityUserPeer(value);
+        setIdentityPreview(null);
+        setIdentityNotice("");
+        setIdentityError("");
+      },
+      onAiPeerChange: (value) => {
+        setIdentityAiPeer(value);
+        setIdentityPreview(null);
+        setIdentityNotice("");
+        setIdentityError("");
+      },
+      onPrepare: prepareIdentityUpdate,
+      onCommit: commitIdentityUpdate,
+      onCancel: () => {
+        setIdentityPreview(null);
+        setIdentityError("");
+      },
+    }));
 
     if (!workspaces.items.length) {
       nodes.push(emptyState("工作区"));
@@ -501,17 +904,82 @@ export default function honchoExploreScreen(ctx: ComposeDslContext): ComposeNode
   }
 
   function renderPeers(): ComposeNode[] {
-    const nodes: ComposeNode[] = [sectionTitle("参与者", `${browsingWorkspace} 中共 ${peers.total} 个`)];
-    if (!peers.items.length) nodes.push(emptyState("参与者"));
-    for (const peer of peers.items) {
-      nodes.push(entityCard(peer.id, [
-        UI.Text({ text: displayTime(peer.created_at), style: "labelSmall", color: colors.onSurfaceVariant }),
-        metadataLine(peer.metadata),
-      ].filter(Boolean) as ComposeNode[], `peer-${peer.id}`));
+    const observerOptions: PeerDto[] = [...peers.items];
+    for (const peerId of [identity?.ai_peer, identity?.user_peer, peerCardObserver]) {
+      if (peerId && !observerOptions.some((peer) => peer.id === peerId)) {
+        observerOptions.push({
+          id: peerId,
+          display_name: "",
+          archived: false,
+          roles: [
+            ...(peerId === identity?.user_peer ? ["user" as const] : []),
+            ...(peerId === identity?.ai_peer ? ["ai" as const] : []),
+          ],
+        });
+      }
     }
-    const pagination = pager(peers, (page) => load("peers", browsingWorkspace, page));
-    if (pagination) nodes.push(pagination);
-    return nodes;
+    return renderPeerWorkspace(ctx, {
+      workspaceId: browsingWorkspace,
+      activeWorkspace: status?.workspace || "",
+      page: peers,
+      selectedPeer,
+      sessions: peerSessions,
+      card: peerCard,
+      observerPeerId: peerCardObserver,
+      observerOptions,
+      observerMenuOpen: peerObserverMenuOpen,
+      showArchived: showArchivedPeers,
+      createOpen: peerCreateOpen,
+      createPeerId: peerCreateId,
+      createDisplayName: peerCreateDisplayName,
+      editDisplayName: peerEditDisplayName,
+      mutationPreview: peerMutationPreview,
+      identityPreview,
+      busy: peerBusy || identityBusy,
+      notice: peerNotice,
+      error: peerError,
+      cardError: peerCardError,
+      onBack: closePeer,
+      onOpenPeer: loadPeerDetail,
+      onPage: (page) => load("peers", browsingWorkspace, page),
+      onSessionPage: (page) => selectedPeer
+        ? loadPeerDetail(selectedPeer.id, peerCardObserver, page)
+        : Promise.resolve(),
+      onShowArchivedChange: setShowArchivedPeers,
+      onCreateOpenChange: (value) => {
+        setPeerCreateOpen(value);
+        setPeerMutationPreview(null);
+        setPeerError("");
+        setPeerNotice("");
+      },
+      onCreatePeerIdChange: (value) => {
+        setPeerCreateId(value);
+        setPeerMutationPreview(null);
+      },
+      onCreateDisplayNameChange: (value) => {
+        setPeerCreateDisplayName(value);
+        setPeerMutationPreview(null);
+      },
+      onEditDisplayNameChange: (value) => {
+        setPeerEditDisplayName(value);
+        setPeerMutationPreview(null);
+      },
+      onPrepareMutation: preparePeerMutation,
+      onCommitMutation: commitPeerMutation,
+      onCancelMutation: () => setPeerMutationPreview(null),
+      onPrepareRole: preparePeerRole,
+      onCommitRole: commitIdentityUpdate,
+      onCancelRole: () => setIdentityPreview(null),
+      onObserverMenuChange: setPeerObserverMenuOpen,
+      onObserverChange: async (peerId) => {
+        setPeerObserverMenuOpen(false);
+        setPeerCardObserver(peerId);
+        await refreshPeerCard(peerId);
+      },
+      onRefreshCard: () => selectedPeer
+        ? loadPeerDetail(selectedPeer.id, peerCardObserver)
+        : Promise.resolve(),
+    });
   }
 
   function renderMessages(): ComposeNode[] {
@@ -603,6 +1071,9 @@ export default function honchoExploreScreen(ctx: ComposeDslContext): ComposeNode
   }
 
   function refreshCurrent(): Promise<void> {
+    if (tab === "peers" && selectedPeer) {
+      return loadPeerDetail(selectedPeer.id, peerCardObserver);
+    }
     if (tab === "sessions" && selectedSessionId) {
       return loadMessages(selectedSessionId, messages.page || 1);
     }
