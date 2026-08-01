@@ -1,0 +1,8 @@
+dist/
+build/
+node_modules/
+*.toolpkg
+*.log
+.DS_Store
+.idea/
+.vscode/

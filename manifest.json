@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "toolpkg_id": "com.operit.honcho",
+  "version": "0.1.0",
+  "main": "dist/main.js",
+  "display_name": {
+    "zh": "Honcho AI 记忆",
+    "en": "Honcho AI Memory"
+  },
+  "description": {
+    "zh": "为 Operit 集成 Honcho v3 跨会话记忆、用户建模、语义检索、推理与持久结论。",
+    "en": "Honcho v3 cross-session memory, user modeling, semantic recall, reasoning, and persistent conclusions for Operit."
+  },
+  "enabled_by_default": false,
+  "subpackages": [
+    {
+      "id": "honcho",
+      "entry": "dist/packages/honcho.js",
+      "enabled_by_default": true,
+      "display_name": {
+        "zh": "Honcho 记忆工具",
+        "en": "Honcho Memory Tools"
+      },
+      "description": {
+        "zh": "查询档案、搜索记忆、读取上下文、执行记忆推理和管理持久结论。",
+        "en": "Profile, search, context, reasoning, and conclusion tools backed by Honcho."
+      }
+    }
+  ]
+}

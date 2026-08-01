@@ -1,0 +1,14 @@
+{
+  "name": "operit-honcho",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Honcho AI memory integration for Operit",
+  "scripts": {
+    "build": "node scripts/clean.mjs && tsc -p tsconfig.json && node scripts/preserve-metadata.mjs",
+    "test": "npm run build && node --test tests/*.test.js",
+    "pack": "npm run test && node scripts/pack.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
