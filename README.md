@@ -13,6 +13,12 @@ Operit ToolPkg integration for [Honcho v3](https://honcho.dev), modeled after th
 - Fails open: Honcho outages never block the original Operit conversation.
 - Supports Honcho Cloud and unauthenticated self-hosted deployments.
 
+## Documentation
+
+- [Architecture](docs/ARCHITECTURE.md): current modules, data model, hooks, persistence, recall, tools, configuration, and failure behavior.
+- [Explore UI plan](docs/EXPLORE_UI_PLAN.md): Operit sidebar information architecture, Honcho Dashboard feature mapping, IPC/API design, delivery phases, and acceptance criteria.
+- [Agent guide](AGENTS.md): repository-specific implementation, testing, security, and release rules.
+
 ## Tools
 
 The `honcho` subpackage exposes five Hermes-compatible tools:
