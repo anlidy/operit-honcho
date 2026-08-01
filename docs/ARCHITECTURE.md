@@ -125,7 +125,7 @@ operit-honcho/
 | Prompt Finalize | `before_send_to_model` | 向本次用户输入注入记忆上下文 |
 | App Lifecycle | `application_on_terminate` | 尝试 flush 未完成写入 |
 
-`src/main.ts` 还注册 `honcho.explorer.request` IPC、`compose_dsl` UI route 和 `main_sidebar_plugins` 导航入口。Explorer UI 通过固定只读 operation allowlist 请求 Workspace、Peer、Session、Message、Conclusion 和队列状态；API Key 只在 main 上下文使用。
+`src/main.ts` 在 `manifest.main` 模块顶层注册 `honcho.explorer.request` IPC，并通过 `registerToolPkg()` 注册 `compose_dsl` UI route 和 `main_sidebar_plugins` 导航入口。顶层 IPC 注册确保 handler 绑定到持久 main 上下文，不会随一次注册调用结束而失效。Explorer UI 通过固定只读 operation allowlist 请求 Workspace、Peer、Session、Message、Conclusion 和队列状态；API Key 只在 main 上下文使用。
 
 ### `src/explorer/`
 

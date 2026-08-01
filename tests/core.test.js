@@ -218,9 +218,10 @@ test("compiled subpackage tools return structured errors when Honcho is not conf
   assert.match(result.error, /not configured/i);
 });
 
-test("ToolPkg main registers all hooks and emits a static mode header", () => {
+test("ToolPkg main registers IPC at module load and installs hooks without rebinding it", () => {
   configure();
   const registered = {};
+  let ipcRegistrations = 0;
   global.ToolPkg = {
     registerUiRoute: (definition) => { registered.ui = definition; },
     registerNavigationEntry: (definition) => { registered.navigation = definition; },
@@ -230,6 +231,7 @@ test("ToolPkg main registers all hooks and emits a static mode header", () => {
     registerAppLifecycleHook: (definition) => { registered.lifecycle = definition; },
     ipc: {
       on: (channel, handler) => {
+        ipcRegistrations += 1;
         registered.ipc = { channel, handler };
         return () => {};
       },
@@ -237,13 +239,16 @@ test("ToolPkg main registers all hooks and emits a static mode header", () => {
   };
 
   const main = require("../dist/main");
+  assert.equal(ipcRegistrations, 1);
   assert.equal(main.registerToolPkg(), true);
+  assert.equal(ipcRegistrations, 1);
   assert.equal(registered.chat.id, "honcho_message_persisted");
   assert.equal(registered.finalize.id, "honcho_memory_context");
   assert.equal(registered.lifecycle.event, "application_on_terminate");
   assert.equal(registered.ipc.channel, "honcho.explorer.request");
   assert.equal(registered.ui.id, "honcho_explore");
   assert.equal(registered.ui.runtime, "compose_dsl");
+  assert.equal(registered.ui.keepAlive, undefined);
   assert.equal(registered.navigation.surface, "main_sidebar_plugins");
   assert.equal(registered.navigation.route, registered.ui.route);
 

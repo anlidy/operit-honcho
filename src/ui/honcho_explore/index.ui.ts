@@ -16,10 +16,10 @@ import { clipText, compactJson, displayTime, pageLabel } from "./format";
 type ExplorerTab = "overview" | "peers" | "sessions" | "conclusions";
 
 const TABS: Array<{ id: ExplorerTab; label: string }> = [
-  { id: "overview", label: "Overview" },
-  { id: "peers", label: "Peers" },
-  { id: "sessions", label: "Sessions" },
-  { id: "conclusions", label: "Conclusions" },
+  { id: "overview", label: "概览" },
+  { id: "peers", label: "参与者" },
+  { id: "sessions", label: "会话" },
+  { id: "conclusions", label: "结论" },
 ];
 
 function emptyPage<T>(size = 20): ExplorerPage<T> {
@@ -27,6 +27,18 @@ function emptyPage<T>(size = 20): ExplorerPage<T> {
 }
 
 function uiError(error: unknown): ExplorerError {
+  const rawMessage = error instanceof Error
+    ? error.message
+    : error && typeof error === "object" && !Array.isArray(error) && (error as Partial<ExplorerError>).message
+      ? String((error as Partial<ExplorerError>).message)
+      : String(error || "未知错误");
+  if (rawMessage.includes("ToolPkg.ipc channel is not registered")) {
+    return {
+      code: "IPC_UNAVAILABLE",
+      message: "Honcho Explorer 服务尚未就绪，请稍后重试。",
+      retryable: true,
+    };
+  }
   if (error && typeof error === "object" && !Array.isArray(error)) {
     const candidate = error as Partial<ExplorerError>;
     if (candidate.message) {
@@ -40,9 +52,43 @@ function uiError(error: unknown): ExplorerError {
   }
   return {
     code: "EXPLORER_ERROR",
-    message: error instanceof Error ? error.message : String(error || "Unknown Explorer error"),
+    message: rawMessage,
     retryable: true,
   };
+}
+
+function errorTitle(code: string): string {
+  const titles: Record<string, string> = {
+    AUTHENTICATION_REQUIRED: "需要认证",
+    PERMISSION_DENIED: "权限不足",
+    NOT_FOUND: "数据不存在",
+    RATE_LIMITED: "请求过于频繁",
+    HONCHO_HTTP_ERROR: "Honcho 服务错误",
+    NETWORK_ERROR: "网络连接失败",
+    INVALID_REQUEST: "请求参数无效",
+    IPC_UNAVAILABLE: "服务尚未就绪",
+    STALE_RESPONSE: "响应已过期",
+    EXPLORER_ERROR: "加载失败",
+  };
+  return titles[code] || "加载失败";
+}
+
+function conclusionLevel(value: string | undefined): string {
+  const labels: Record<string, string> = {
+    explicit: "明确结论",
+    deductive: "演绎结论",
+    inductive: "归纳结论",
+    contradiction: "矛盾结论",
+  };
+  return labels[value || "explicit"] || "结论";
+}
+
+function recallModeLabel(value: string): string {
+  return { hybrid: "混合召回", context: "上下文召回", tools: "工具召回" }[value] || value;
+}
+
+function sessionStrategyLabel(value: string): string {
+  return { "per-chat": "独立会话", global: "全局会话" }[value] || value;
 }
 
 export default function honchoExploreScreen(ctx: ComposeDslContext): ComposeNode {
@@ -90,9 +136,9 @@ export default function honchoExploreScreen(ctx: ComposeDslContext): ComposeNode
       { targetRuntime: "main" }
     );
     if (!response || response.requestId !== requestId) {
-      throw { code: "STALE_RESPONSE", message: "Explorer returned an invalid response.", retryable: true };
+      throw { code: "STALE_RESPONSE", message: "Explorer 返回了无效响应。", retryable: true };
     }
-    if (!response.ok) throw response.error || { code: "EXPLORER_ERROR", message: "Explorer request failed." };
+    if (!response.ok) throw response.error || { code: "EXPLORER_ERROR", message: "Explorer 请求失败。" };
     return response.data as T;
   }
 
@@ -134,8 +180,8 @@ export default function honchoExploreScreen(ctx: ComposeDslContext): ComposeNode
           .map((result) => uiError((result as PromiseRejectedResult).reason));
         if (failures.length) {
           setPartialNotice(failures.some((item) => item.code === "PERMISSION_DENIED")
-            ? "Some data is hidden by the current API key scope."
-            : "Some overview data could not be loaded.");
+            ? "当前 API Key 权限有限，部分数据不可见。"
+            : "部分概览数据加载失败。");
         }
       } else if (targetTab === "peers") {
         setPeers(await remote("list_peers", targetWorkspace, { page, size: 20, reverse: true }));
@@ -285,7 +331,7 @@ export default function honchoExploreScreen(ctx: ComposeDslContext): ComposeNode
       { fillMaxWidth: true, horizontalAlignment: "center", padding: 28, spacing: 6 },
       [
         UI.Icon({ name: "inbox", size: 28, tint: colors.onSurfaceVariant }),
-        UI.Text({ text: `No ${label}`, style: "bodyMedium", color: colors.onSurfaceVariant }),
+        UI.Text({ text: `暂无${label}`, style: "bodyMedium", color: colors.onSurfaceVariant }),
       ]
     );
   }
@@ -332,9 +378,9 @@ export default function honchoExploreScreen(ctx: ComposeDslContext): ComposeNode
           },
           [
             UI.Column({ fillMaxWidth: true, padding: 14, spacing: 7 }, [
-              UI.Text({ text: "Honcho is not configured", style: "titleMedium", color: colors.onErrorContainer }),
+              UI.Text({ text: "Honcho 尚未配置", style: "titleMedium", color: colors.onErrorContainer }),
               UI.Text({
-                text: "Set HONCHO_API_KEY and HONCHO_WORKSPACE, or configure HONCHO_BASE_URL for self-hosting.",
+                text: "请设置 HONCHO_API_KEY 和 HONCHO_WORKSPACE；使用自托管服务时也可设置 HONCHO_BASE_URL。",
                 style: "bodySmall",
                 color: colors.onErrorContainer,
                 softWrap: true,
@@ -347,7 +393,7 @@ export default function honchoExploreScreen(ctx: ComposeDslContext): ComposeNode
 
     const queue = status.server_queue;
     const nodes: ComposeNode[] = [
-      sectionTitle("Runtime", "Connection, active peers, and write pipeline"),
+      sectionTitle("运行状态", "连接配置、参与者与写入队列"),
       UI.Row({ fillMaxWidth: true, spacing: 8 }, [
         UI.Surface(
           {
@@ -358,7 +404,7 @@ export default function honchoExploreScreen(ctx: ComposeDslContext): ComposeNode
           },
           [UI.Column({ spacing: 2 }, [
             UI.Text({ text: String(status.pending_messages), style: "titleLarge", color: colors.onSecondaryContainer }),
-            UI.Text({ text: "Local pending", style: "labelSmall", color: colors.onSecondaryContainer }),
+            UI.Text({ text: "本地待写", style: "labelSmall", color: colors.onSecondaryContainer }),
           ])]
         ),
         UI.Surface(
@@ -370,22 +416,22 @@ export default function honchoExploreScreen(ctx: ComposeDslContext): ComposeNode
           },
           [UI.Column({ spacing: 2 }, [
             UI.Text({ text: String(queue?.pending_work_units || 0), style: "titleLarge", color: colors.onTertiaryContainer }),
-            UI.Text({ text: "Server pending", style: "labelSmall", color: colors.onTertiaryContainer }),
+            UI.Text({ text: "服务端待处理", style: "labelSmall", color: colors.onTertiaryContainer }),
           ])]
         ),
       ]),
       UI.Text({
-        text: `${status.user_peer} → ${status.ai_peer}  ·  ${status.recall_mode}  ·  ${status.session_strategy}`,
+        text: `${status.user_peer} → ${status.ai_peer}  ·  ${recallModeLabel(status.recall_mode)}  ·  ${sessionStrategyLabel(status.session_strategy)}`,
         style: "bodySmall",
         color: colors.onSurfaceVariant,
         maxLines: 2,
         overflow: "ellipsis",
       }),
-      sectionTitle("Workspaces", `${workspaces.total} visible to this API key`),
+      sectionTitle("工作区", `当前密钥可见 ${workspaces.total} 个`),
     ];
 
     if (!workspaces.items.length) {
-      nodes.push(emptyState("workspaces"));
+      nodes.push(emptyState("工作区"));
     } else {
       for (const workspace of workspaces.items) {
         const selected = workspace.id === browsingWorkspace;
@@ -419,7 +465,7 @@ export default function honchoExploreScreen(ctx: ComposeDslContext): ComposeNode
                       overflow: "ellipsis",
                     }),
                     UI.Text({
-                      text: workspace.id === status.workspace ? "Active workspace" : displayTime(workspace.created_at),
+                      text: workspace.id === status.workspace ? "当前活跃工作区" : displayTime(workspace.created_at),
                       style: "labelSmall",
                       color: colors.onSurfaceVariant,
                     }),
@@ -432,31 +478,31 @@ export default function honchoExploreScreen(ctx: ComposeDslContext): ComposeNode
       }
     }
 
-    nodes.push(sectionTitle("Recent peers", `${peers.total} total`));
+    nodes.push(sectionTitle("最近参与者", `共 ${peers.total} 个`));
     for (const peer of peers.items) {
       nodes.push(entityCard(peer.id, [
         UI.Text({ text: displayTime(peer.created_at), style: "labelSmall", color: colors.onSurfaceVariant }),
       ], `overview-peer-${peer.id}`));
     }
-    if (!peers.items.length) nodes.push(emptyState("peers"));
+    if (!peers.items.length) nodes.push(emptyState("参与者"));
 
-    nodes.push(sectionTitle("Recent sessions", `${sessions.total} total`));
+    nodes.push(sectionTitle("最近会话", `共 ${sessions.total} 个`));
     for (const session of sessions.items) {
       nodes.push(entityCard(session.id, [
         UI.Text({
-          text: `${session.is_active === false ? "Inactive" : "Active"}  ·  ${displayTime(session.created_at)}`,
+          text: `${session.is_active === false ? "已停用" : "活跃"}  ·  ${displayTime(session.created_at)}`,
           style: "labelSmall",
           color: colors.onSurfaceVariant,
         }),
       ], `overview-session-${session.id}`, () => openSession(session.id)));
     }
-    if (!sessions.items.length) nodes.push(emptyState("sessions"));
+    if (!sessions.items.length) nodes.push(emptyState("会话"));
     return nodes;
   }
 
   function renderPeers(): ComposeNode[] {
-    const nodes: ComposeNode[] = [sectionTitle("Peers", `${peers.total} in ${browsingWorkspace}`)];
-    if (!peers.items.length) nodes.push(emptyState("peers"));
+    const nodes: ComposeNode[] = [sectionTitle("参与者", `${browsingWorkspace} 中共 ${peers.total} 个`)];
+    if (!peers.items.length) nodes.push(emptyState("参与者"));
     for (const peer of peers.items) {
       nodes.push(entityCard(peer.id, [
         UI.Text({ text: displayTime(peer.created_at), style: "labelSmall", color: colors.onSurfaceVariant }),
@@ -473,7 +519,7 @@ export default function honchoExploreScreen(ctx: ComposeDslContext): ComposeNode
       UI.Row({ fillMaxWidth: true, height: 48, verticalAlignment: "center", spacing: 6 }, [
         UI.IconButton({ icon: "arrow_back", enabled: !loading, onClick: closeSession }),
         UI.Column({ weight: 1, spacing: 1 }, [
-          UI.Text({ text: "Messages", style: "titleMedium", color: colors.onSurface, fontWeight: "bold" }),
+          UI.Text({ text: "消息", style: "titleMedium", color: colors.onSurface, fontWeight: "bold" }),
           UI.Text({
             text: selectedSessionId,
             style: "labelSmall",
@@ -485,10 +531,10 @@ export default function honchoExploreScreen(ctx: ComposeDslContext): ComposeNode
         UI.Text({ text: String(messages.total), style: "labelMedium", color: colors.onSurfaceVariant }),
       ]),
     ];
-    if (!messages.items.length) nodes.push(emptyState("messages"));
+    if (!messages.items.length) nodes.push(emptyState("消息"));
     for (const message of messages.items) {
-      const details = [displayTime(message.created_at), `${message.token_count || 0} tokens`].join("  ·  ");
-      nodes.push(entityCard(message.peer_id || "Unknown peer", [
+      const details = [displayTime(message.created_at), `${message.token_count || 0} 个 token`].join("  ·  ");
+      nodes.push(entityCard(message.peer_id || "未知参与者", [
         UI.Text({
           text: message.content || "",
           style: "bodyMedium",
@@ -516,12 +562,12 @@ export default function honchoExploreScreen(ctx: ComposeDslContext): ComposeNode
 
   function renderSessions(): ComposeNode[] {
     if (selectedSessionId) return renderMessages();
-    const nodes: ComposeNode[] = [sectionTitle("Sessions", `${sessions.total} in ${browsingWorkspace}`)];
-    if (!sessions.items.length) nodes.push(emptyState("sessions"));
+    const nodes: ComposeNode[] = [sectionTitle("会话", `${browsingWorkspace} 中共 ${sessions.total} 个`)];
+    if (!sessions.items.length) nodes.push(emptyState("会话"));
     for (const session of sessions.items) {
       nodes.push(entityCard(session.id, [
         UI.Text({
-          text: `${session.is_active === false ? "Inactive" : "Active"}  ·  ${displayTime(session.created_at)}`,
+          text: `${session.is_active === false ? "已停用" : "活跃"}  ·  ${displayTime(session.created_at)}`,
           style: "labelSmall",
           color: session.is_active === false ? colors.onSurfaceVariant : colors.primary,
         }),
@@ -534,15 +580,15 @@ export default function honchoExploreScreen(ctx: ComposeDslContext): ComposeNode
   }
 
   function renderConclusions(): ComposeNode[] {
-    const nodes: ComposeNode[] = [sectionTitle("Conclusions", `${conclusions.total} in ${browsingWorkspace}`)];
-    if (!conclusions.items.length) nodes.push(emptyState("conclusions"));
+    const nodes: ComposeNode[] = [sectionTitle("结论", `${browsingWorkspace} 中共 ${conclusions.total} 条`)];
+    if (!conclusions.items.length) nodes.push(emptyState("结论"));
     for (const conclusion of conclusions.items) {
       const scope = [conclusion.observer_id, conclusion.observed_id]
         .filter(Boolean)
         .join(" → ");
       nodes.push(entityCard(clipText(conclusion.content, 220), [
         UI.Text({
-          text: `${conclusion.level || "explicit"}${scope ? `  ·  ${scope}` : ""}`,
+          text: `${conclusionLevel(conclusion.level)}${scope ? `  ·  ${scope}` : ""}`,
           style: "bodySmall",
           color: colors.onSurfaceVariant,
           maxLines: 2,
@@ -582,11 +628,11 @@ export default function honchoExploreScreen(ctx: ComposeDslContext): ComposeNode
       },
       [
         UI.Column({ weight: 1, spacing: 1 }, [
-          UI.Text({ text: "Honcho Explore", style: "titleLarge", color: colors.onSurface, fontWeight: "bold" }),
+          UI.Text({ text: "Honcho 探索", style: "titleLarge", color: colors.onSurface, fontWeight: "bold" }),
           UI.Text({
-            text: status?.configured ? "Connected" : "Configuration required",
+            text: status ? (status.configured ? "已连接" : "需要配置") : "正在连接",
             style: "labelSmall",
-            color: status?.configured ? colors.primary : colors.error,
+            color: !status ? colors.onSurfaceVariant : status.configured ? colors.primary : colors.error,
           }),
         ]),
         UI.IconButton({
@@ -605,7 +651,7 @@ export default function honchoExploreScreen(ctx: ComposeDslContext): ComposeNode
     }, [
       UI.Icon({ name: "database", size: 18, tint: colors.primary }),
       UI.Text({
-        text: browsingWorkspace || status?.workspace || "No workspace",
+        text: browsingWorkspace || status?.workspace || "暂无工作区",
         style: "labelLarge",
         color: colors.onSurface,
         maxLines: 1,
@@ -613,7 +659,7 @@ export default function honchoExploreScreen(ctx: ComposeDslContext): ComposeNode
         weight: 1,
       }),
       browsingWorkspace && status?.workspace && browsingWorkspace !== status.workspace
-        ? UI.Text({ text: "Browsing", style: "labelSmall", color: colors.tertiary })
+        ? UI.Text({ text: "浏览中", style: "labelSmall", color: colors.tertiary })
         : null,
     ].filter(Boolean) as ComposeNode[]),
     UI.PrimaryScrollableTabRow({
@@ -639,15 +685,15 @@ export default function honchoExploreScreen(ctx: ComposeDslContext): ComposeNode
     items.push(UI.Card(
       { fillMaxWidth: true, elevation: 0, shape: { type: "rounded", cornerRadius: 8 }, containerColor: colors.errorContainer },
       [UI.Column({ fillMaxWidth: true, padding: 14, spacing: 8 }, [
-        UI.Text({ text: error.code.replace(/_/g, " "), style: "titleSmall", color: colors.onErrorContainer, fontWeight: "bold" }),
+        UI.Text({ text: errorTitle(error.code), style: "titleSmall", color: colors.onErrorContainer, fontWeight: "bold" }),
         UI.Text({ text: clipText(error.message, 500), style: "bodySmall", color: colors.onErrorContainer, softWrap: true }),
-        UI.Button({ text: "Retry", enabled: !loading, onClick: refreshCurrent }),
+        UI.Button({ text: "重试", enabled: !loading, onClick: refreshCurrent }),
       ])]
     ));
   } else if (loading && !hasLoaded) {
     items.push(UI.Column(
       { fillMaxWidth: true, horizontalAlignment: "center", padding: 32, spacing: 8 },
-      [UI.CircularProgressIndicator({}), UI.Text({ text: "Loading Honcho...", color: colors.onSurfaceVariant })]
+      [UI.CircularProgressIndicator({}), UI.Text({ text: "正在加载 Honcho...", color: colors.onSurfaceVariant })]
     ));
   } else if (tab === "overview") {
     items.push(...renderOverview());

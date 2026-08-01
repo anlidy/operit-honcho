@@ -16,7 +16,7 @@ export function compactJson(value: unknown, maximum = 140): string {
 
 export function displayTime(value: unknown): string {
   const text = String(value == null ? "" : value).trim();
-  if (!text) return "Unknown time";
+  if (!text) return "时间未知";
   return text.replace("T", " ").replace(/\.\d+(?=Z|[+-]\d\d:\d\d$)/, "");
 }
 

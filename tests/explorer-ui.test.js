@@ -38,9 +38,9 @@ test("Explorer screen renders a stable sidebar shell before network loading", ()
   assert.equal(typeof root.props.onLoad, "function");
   assert.ok(root.children.some((node) => node.type === "PrimaryScrollableTabRow"));
   const serialized = JSON.stringify(root, (key, value) => typeof value === "function" ? "[function]" : value);
-  assert.match(serialized, /Honcho Explore/);
-  assert.match(serialized, /Overview/);
-  assert.match(serialized, /Conclusions/);
+  assert.match(serialized, /Honcho 探索/);
+  assert.match(serialized, /概览/);
+  assert.match(serialized, /结论/);
 });
 
 test("Explorer screen renders a paged session message timeline", () => {

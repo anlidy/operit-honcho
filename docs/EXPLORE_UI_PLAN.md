@@ -101,15 +101,14 @@ ToolPkg.registerUiRoute({
   route: "toolpkg:com.operit.honcho:ui:honcho_explore",
   runtime: "compose_dsl",
   screen: honchoExploreScreen,
-  keepAlive: true,
-  title: { zh: "Honcho Explore", en: "Honcho Explore" },
+  title: { zh: "Honcho 探索", en: "Honcho Explore" },
 });
 
 ToolPkg.registerNavigationEntry({
   id: "honcho_explore_sidebar",
   route: "toolpkg:com.operit.honcho:ui:honcho_explore",
   surface: "main_sidebar_plugins",
-  title: { zh: "Honcho Explore", en: "Honcho Explore" },
+  title: { zh: "Honcho 探索", en: "Honcho Explore" },
   icon: Icons.Book,
   order: 220,
 });
@@ -480,7 +479,7 @@ Compose DSL 没有 React `useEffect` 语义。初次加载采用 `hasLoaded + in
 ### 真机验证
 
 - `debug_install_toolpkg` 后主侧边栏出现 `Honcho Explore`。
-- 首次打开、返回、再次打开和 keepAlive 行为正确。
+- 首次打开、返回、再次打开时均创建有效 UI runtime，不复用已销毁的 engine。
 - `test` Workspace 的 Peer、Session 和 Message 可见。
 - 搜索能定位已知测试消息。
 - Context、Reasoning 和 Conclusion 操作结果与直接 API 一致。
