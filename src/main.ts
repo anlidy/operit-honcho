@@ -5,8 +5,21 @@ import { createToolPkgPromptSidecarStore, PromptSidecarStore } from "./prompt_si
 import honchoExploreScreen from "./ui/honcho_explore/index.ui.js";
 
 const HONCHO_EXPLORE_ROUTE = "toolpkg:com.operit.honcho:ui:honcho_explore";
-const explorerService = new ExplorerService(honchoController);
 let promptSidecars: PromptSidecarStore | null = null;
+const explorerService = new ExplorerService(honchoController, undefined, {
+  status: async () => {
+    const value = await sidecars().statistics();
+    return {
+      file_count: value.fileCount,
+      total_bytes: value.totalBytes,
+      max_bytes: value.maxBytes,
+    };
+  },
+  clear: async () => {
+    const value = await sidecars().clearAll();
+    return { deleted_files: value.fileCount, deleted_bytes: value.totalBytes };
+  },
+});
 
 // IPC handlers must be registered in the persistent manifest.main context.
 ToolPkg.ipc.on("honcho.explorer.request", onExplorerRequest);

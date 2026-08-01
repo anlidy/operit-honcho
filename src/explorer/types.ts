@@ -13,7 +13,13 @@ export type ExplorerOperation =
   | "commit_peer_mutation"
   | "list_sessions"
   | "list_messages"
-  | "list_conclusions";
+  | "list_conclusions"
+  | "scan_conclusion_duplicates"
+  | "prepare_conclusion_cleanup"
+  | "commit_conclusion_cleanup"
+  | "sidecar_status"
+  | "prepare_sidecar_clear"
+  | "commit_sidecar_clear";
 
 export interface ExplorerRequest {
   op: ExplorerOperation;
@@ -33,6 +39,12 @@ export interface ExplorerRequest {
     userPeerId?: string;
     aiPeerId?: string;
     confirmationToken?: string;
+    forceRefresh?: boolean;
+    query?: string;
+    conclusionLevel?: ConclusionLevel;
+    keepConclusionId?: string;
+    deleteConclusionIds?: string[];
+    confirmationText?: string;
   };
 }
 
@@ -134,10 +146,91 @@ export interface ConclusionDto {
   id: string;
   content: string;
   observer_id?: string;
+  observer_display_name?: string;
   observed_id?: string;
+  observed_display_name?: string;
   session_id?: string | null;
-  level?: "explicit" | "deductive" | "inductive" | "contradiction";
+  level?: ConclusionLevel;
   created_at?: string;
+}
+
+export type ConclusionLevel = "explicit" | "deductive" | "inductive" | "contradiction";
+
+export interface ConclusionFiltersDto {
+  observer_id?: string;
+  observed_id?: string;
+  session_id?: string;
+  level?: ConclusionLevel;
+  query?: string;
+}
+
+export interface ConclusionDuplicateItemDto {
+  id: string;
+  created_at?: string;
+  level?: ConclusionLevel;
+}
+
+export interface ConclusionDuplicateGroupDto {
+  group_key: string;
+  content: string;
+  observer_id: string;
+  observer_display_name?: string;
+  observed_id: string;
+  observed_display_name?: string;
+  session_id?: string | null;
+  items: ConclusionDuplicateItemDto[];
+  earliest_id: string;
+  latest_id: string;
+}
+
+export interface ConclusionDuplicateReportDto {
+  workspace_id: string;
+  scanned_count: number;
+  duplicate_count: number;
+  groups: ConclusionDuplicateGroupDto[];
+  truncated: boolean;
+}
+
+export interface ConclusionCleanupPreviewDto {
+  workspace_id: string;
+  group_key: string;
+  observer_id: string;
+  observed_id: string;
+  session_id?: string | null;
+  keep_conclusion_id: string;
+  delete_conclusion_ids: string[];
+  confirmation_phrase: string;
+  confirmation_token: string;
+  expires_at: string;
+}
+
+export interface ConclusionCleanupFailureDto {
+  id: string;
+  error: string;
+}
+
+export interface ConclusionCleanupResultDto {
+  workspace_id: string;
+  keep_conclusion_id: string;
+  deleted_ids: string[];
+  failures: ConclusionCleanupFailureDto[];
+}
+
+export interface PromptSidecarStatusDto {
+  file_count: number;
+  total_bytes: number;
+  max_bytes: number;
+}
+
+export interface PromptSidecarClearPreviewDto extends PromptSidecarStatusDto {
+  confirmation_phrase: string;
+  confirmation_token: string;
+  expires_at: string;
+}
+
+export interface PromptSidecarClearResultDto {
+  deleted_files: number;
+  deleted_bytes: number;
 }
 
 export interface QueueStatusDto {

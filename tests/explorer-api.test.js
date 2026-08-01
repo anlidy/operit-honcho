@@ -86,6 +86,44 @@ test("Honcho HTTP errors retain status for Explorer error mapping", async () => 
   );
 });
 
+test("Explorer Conclusion API maps server filters, semantic query, and encoded deletion", async () => {
+  const requests = [];
+  const api = new HonchoApi(loadConfig(), async (request) => {
+    requests.push(request);
+    if (request.url.includes("/conclusions/list")) {
+      return { statusCode: 200, content: page([{ id: "c-list", content: "listed" }]) };
+    }
+    if (request.url.endsWith("/conclusions/query")) {
+      return { statusCode: 200, content: JSON.stringify([{ id: "c-query", content: "matched" }]) };
+    }
+    if (request.method === "DELETE") return { statusCode: 204, content: "" };
+    return { statusCode: 404, content: "not found" };
+  });
+  const filters = {
+    observer_id: "assistant",
+    observed_id: "owner",
+    session_id: "session/id",
+    level: "explicit",
+  };
+
+  const listed = await api.listConclusionsGeneric("space/id", 2, 10, true, filters);
+  const queried = await api.queryConclusionsGeneric("space/id", "known fact", 7, filters);
+  await api.deleteConclusionFor("space/id", "conclusion/id");
+
+  assert.equal(listed.items[0].id, "c-list");
+  assert.equal(queried[0].id, "c-query");
+  assert.ok(requests.some((request) => request.method === "POST"
+    && request.url.endsWith("/conclusions/list?page=2&size=10&reverse=true")
+    && JSON.stringify(request.body) === JSON.stringify({ filters })));
+  assert.ok(requests.some((request) => request.method === "POST"
+    && request.url.endsWith("/conclusions/query")
+    && request.body.query === "known fact"
+    && request.body.top_k === 7
+    && JSON.stringify(request.body.filters) === JSON.stringify(filters)));
+  assert.ok(requests.some((request) => request.method === "DELETE"
+    && request.url.endsWith("/conclusions/conclusion%2Fid")));
+});
+
 test("Explorer Peer API maps detail, metadata, sessions, Card, and member removal", async () => {
   const requests = [];
   const transport = async (request) => {

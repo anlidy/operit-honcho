@@ -124,6 +124,8 @@ export async function operitHttpTransport(request: HttpRequest): Promise<HttpRes
     headers: request.headers,
     body: request.body,
     responseType: "text",
+    connect_timeout: 15000,
+    read_timeout: 60000,
     follow_redirects: true,
     validateStatus: false,
   });
@@ -235,12 +237,22 @@ export class HonchoApi {
     path: string,
     body?: object
   ): Promise<T> {
-    const response = await this.transport({
-      method,
-      url: `${this.config.baseUrl}${path}`,
-      headers: this.headers(),
-      body,
-    });
+    const startedAt = Date.now();
+    let response: HttpResponse;
+    try {
+      response = await this.transport({
+        method,
+        url: `${this.config.baseUrl}${path}`,
+        headers: this.headers(),
+        body,
+      });
+    } catch (error) {
+      console.log(`[honcho] http method=${method} duration_ms=${Date.now() - startedAt} status=network_error`);
+      throw error;
+    }
+    console.log(
+      `[honcho] http method=${method} duration_ms=${Date.now() - startedAt} status=${response.statusCode}`
+    );
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw new HonchoHttpError(response.statusCode, response.content || "");
     }
@@ -411,16 +423,41 @@ export class HonchoApi {
     workspaceId: string,
     page = 1,
     size = 20,
-    reverse = false
+    reverse = false,
+    filters?: JsonRecord
   ): Promise<HonchoPage<Conclusion>> {
     const result = await this.request<unknown>(
       "POST",
       `${this.workspacePathFor(workspaceId, "/conclusions/list")}${queryString(
         pageParams(page, size, reverse)
       )}`,
-      {}
+      filters && Object.keys(filters).length ? { filters } : {}
     );
     return parsePage<Conclusion>(result);
+  }
+
+  async queryConclusionsGeneric(
+    workspaceId: string,
+    query: string,
+    topK = 20,
+    filters?: JsonRecord
+  ): Promise<Conclusion[]> {
+    return this.request<Conclusion[]>(
+      "POST",
+      this.workspacePathFor(workspaceId, "/conclusions/query"),
+      {
+        query: clipQuery(query, 4000),
+        top_k: Math.max(1, Math.min(100, Math.trunc(topK))),
+        ...(filters && Object.keys(filters).length ? { filters } : {}),
+      }
+    );
+  }
+
+  async deleteConclusionFor(workspaceId: string, id: string): Promise<void> {
+    await this.request<void>(
+      "DELETE",
+      this.workspacePathFor(workspaceId, `/conclusions/${encodeURIComponent(id)}`)
+    );
   }
 
   async getQueueStatus(workspaceId: string): Promise<HonchoQueueStatus> {
@@ -860,7 +897,7 @@ export class HonchoApi {
 
   async deleteConclusion(id: string): Promise<void> {
     await this.ensureWorkspace();
-    await this.request<void>("DELETE", this.workspacePath(`/conclusions/${encodeURIComponent(id)}`));
+    await this.deleteConclusionFor(this.workspaceId, id);
   }
 
   async listConclusions(query = "", peer = "user", limit = 20): Promise<Conclusion[]> {

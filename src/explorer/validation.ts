@@ -16,6 +16,12 @@ const OPERATIONS: ExplorerOperation[] = [
   "list_sessions",
   "list_messages",
   "list_conclusions",
+  "scan_conclusion_duplicates",
+  "prepare_conclusion_cleanup",
+  "commit_conclusion_cleanup",
+  "sidecar_status",
+  "prepare_sidecar_clear",
+  "commit_sidecar_clear",
 ];
 
 export class ExplorerValidationError extends Error {
@@ -70,6 +76,41 @@ function optionalToken(value: unknown): string | undefined {
   return value.trim();
 }
 
+function optionalText(value: unknown, name: string, maximum: number): string | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  if (typeof value !== "string") {
+    throw new ExplorerValidationError(name + " must be a string.");
+  }
+  const text = value.trim();
+  if (!text || text.length > maximum) {
+    throw new ExplorerValidationError(name + " must contain 1 to " + maximum + " characters.");
+  }
+  return text;
+}
+
+function optionalConclusionLevel(
+  value: unknown
+): NonNullable<ExplorerRequest["params"]>["conclusionLevel"] {
+  if (value === undefined || value === null || value === "") return undefined;
+  const allowed = ["explicit", "deductive", "inductive", "contradiction"];
+  if (typeof value !== "string" || !allowed.includes(value)) {
+    throw new ExplorerValidationError("Unknown conclusionLevel.");
+  }
+  return value as NonNullable<ExplorerRequest["params"]>["conclusionLevel"];
+}
+
+function optionalIdArray(value: unknown, name: string): string[] | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!Array.isArray(value) || !value.length || value.length > 100) {
+    throw new ExplorerValidationError(name + " must contain 1 to 100 IDs.");
+  }
+  const ids = value.map((item) => optionalId(item, name + " item") || "");
+  if (new Set(ids).size !== ids.length) {
+    throw new ExplorerValidationError(name + " must not contain duplicate IDs.");
+  }
+  return ids;
+}
+
 function record(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new ExplorerValidationError("Explorer request must be an object.");
@@ -116,6 +157,10 @@ export function parseExplorerRequest(value: unknown): ExplorerRequest {
   if (reverseValue !== undefined && typeof reverseValue !== "boolean") {
     throw new ExplorerValidationError("reverse must be a boolean.");
   }
+  const forceRefreshValue = paramsInput.forceRefresh;
+  if (forceRefreshValue !== undefined && typeof forceRefreshValue !== "boolean") {
+    throw new ExplorerValidationError("forceRefresh must be a boolean.");
+  }
   const params: NonNullable<ExplorerRequest["params"]> = {
     page: optionalInteger(paramsInput.page, "page", 1, 100000),
     size: optionalInteger(paramsInput.size, "size", 1, 100),
@@ -134,6 +179,12 @@ export function parseExplorerRequest(value: unknown): ExplorerRequest {
     userPeerId: optionalPeerId(paramsInput.userPeerId, "userPeerId"),
     aiPeerId: optionalPeerId(paramsInput.aiPeerId, "aiPeerId"),
     confirmationToken: optionalToken(paramsInput.confirmationToken),
+    forceRefresh: forceRefreshValue as boolean | undefined,
+    query: optionalText(paramsInput.query, "query", 4000),
+    conclusionLevel: optionalConclusionLevel(paramsInput.conclusionLevel),
+    keepConclusionId: optionalId(paramsInput.keepConclusionId, "keepConclusionId"),
+    deleteConclusionIds: optionalIdArray(paramsInput.deleteConclusionIds, "deleteConclusionIds"),
+    confirmationText: optionalText(paramsInput.confirmationText, "confirmationText", 100),
   };
 
   const request: ExplorerRequest = {
@@ -195,6 +246,41 @@ export function parseExplorerRequest(value: unknown): ExplorerRequest {
     throw new ExplorerValidationError(
       "A confirmation token is required to update a Peer.",
       "CONFIRMATION_REQUIRED"
+    );
+  }
+  if (
+    (request.op === "prepare_conclusion_cleanup" || request.op === "commit_conclusion_cleanup")
+    && (!request.params?.keepConclusionId || !request.params.deleteConclusionIds?.length)
+  ) {
+    throw new ExplorerValidationError(
+      "keepConclusionId and deleteConclusionIds are required for Conclusion cleanup."
+    );
+  }
+  if (request.params?.deleteConclusionIds?.includes(request.params.keepConclusionId || "")) {
+    throw new ExplorerValidationError("The kept Conclusion cannot also be deleted.");
+  }
+  if (request.op === "commit_conclusion_cleanup" && !request.params?.confirmationToken) {
+    throw new ExplorerValidationError(
+      "A confirmation token is required to delete Conclusions.",
+      "CONFIRMATION_REQUIRED"
+    );
+  }
+  if (request.op === "commit_conclusion_cleanup" && !request.params?.confirmationText) {
+    throw new ExplorerValidationError(
+      "Confirmation text is required to delete Conclusions.",
+      "CONFIRMATION_TEXT_REQUIRED"
+    );
+  }
+  if (request.op === "commit_sidecar_clear" && !request.params?.confirmationToken) {
+    throw new ExplorerValidationError(
+      "A confirmation token is required to clear prompt sidecars.",
+      "CONFIRMATION_REQUIRED"
+    );
+  }
+  if (request.op === "commit_sidecar_clear" && !request.params?.confirmationText) {
+    throw new ExplorerValidationError(
+      "Confirmation text is required to clear prompt sidecars.",
+      "CONFIRMATION_TEXT_REQUIRED"
     );
   }
   return request;

@@ -18,6 +18,10 @@ Operit ToolPkg integration for [Honcho v3](https://honcho.dev), modeled after th
 - Provides a protected Explorer flow to migrate legacy bindings or change User/AI roles. Every write requires a revision-bound, five-minute, single-use confirmation.
 - Provides Peer detail, display names, archive state, paged Session membership, and directional Peer Card previews. Peer IDs remain immutable and archive/remove actions never claim to delete remote history.
 - Protects Peer creation, display-name changes, archive/restore, role changes, and Session removal with five-minute single-use previews restricted to the active Hook Workspace.
+- Filters Conclusions on the server by observer, observed Peer, Session, level, or semantic query, and resolves each direction to current Peer display names.
+- Scans up to 5,000 Conclusions for exact scope/content duplicates and deletes only a confirmed group selection, with single-use typed confirmation and partial-failure reporting.
+- Keeps Explorer reads in a 30-second Workspace/operation cache, coalesces identical in-flight requests, and lets explicit refreshes bypass cached data.
+- Bounds private prompt sidecars to 8 MiB overall and 1 MiB per Chat file, merges same-turn retries, evicts old files by LRU, and exposes a typed clear flow in Overview.
 - Requires custom tool Peer IDs to already exist and reports `resolved_peer_id` plus the configured display name in tool responses.
 - Formats Honcho timestamps for `Asia/Shanghai`, with a deterministic UTC+8 fallback when the runtime lacks time-zone data.
 - Uses a fixed, validated IPC operation allowlist so the UI never receives the API key or constructs Honcho HTTP requests.

@@ -1,6 +1,11 @@
 import type { ComposeColor, ComposeDslContext, ComposeNode } from "../../../../types/compose-dsl";
 import type {
   ConclusionDto,
+  ConclusionCleanupPreviewDto,
+  ConclusionCleanupResultDto,
+  ConclusionDuplicateGroupDto,
+  ConclusionDuplicateReportDto,
+  ConclusionFiltersDto,
   ExplorerError,
   ExplorerOperation,
   ExplorerPage,
@@ -13,6 +18,9 @@ import type {
   PeerMutationPreviewDto,
   PeerMutationResultDto,
   QueueStatusDto,
+  PromptSidecarClearPreviewDto,
+  PromptSidecarClearResultDto,
+  PromptSidecarStatusDto,
   SessionDto,
   WorkspaceDto,
   WorkspaceIdentityDto,
@@ -21,6 +29,7 @@ import type {
 import { clipText, compactJson, displayTime, pageLabel } from "./format";
 import { renderIdentityManager } from "./identity.ui.js";
 import { renderPeerWorkspace } from "./peers.ui.js";
+import { renderConclusionWorkspace } from "./conclusions.ui.js";
 
 type ExplorerTab = "overview" | "peers" | "sessions" | "conclusions";
 
@@ -85,20 +94,15 @@ function errorTitle(code: string): string {
     PEER_SESSION_NOT_FOUND: "会话成员关系不存在",
     ACTIVE_PEER_ARCHIVE_FORBIDDEN: "活跃角色不能归档",
     PEER_CONFLICT: "参与者资料已变化",
+    CONCLUSION_CONFLICT: "结论重复组已变化",
+    CONFIRMATION_TEXT_REQUIRED: "需要输入确认文字",
+    CONFIRMATION_TEXT_MISMATCH: "确认文字不匹配",
+    SIDECAR_UNAVAILABLE: "Sidecar 管理不可用",
+    SIDECAR_CONFLICT: "Sidecar 数据已变化",
     STALE_RESPONSE: "响应已过期",
     EXPLORER_ERROR: "加载失败",
   };
   return titles[code] || "加载失败";
-}
-
-function conclusionLevel(value: string | undefined): string {
-  const labels: Record<string, string> = {
-    explicit: "明确结论",
-    deductive: "演绎结论",
-    inductive: "归纳结论",
-    contradiction: "矛盾结论",
-  };
-  return labels[value || "explicit"] || "结论";
 }
 
 function recallModeLabel(value: string): string {
@@ -107,6 +111,27 @@ function recallModeLabel(value: string): string {
 
 function sessionStrategyLabel(value: string): string {
   return { "per-chat": "独立会话", global: "全局会话" }[value] || value;
+}
+
+function normalizedConclusionFilters(value: ConclusionFiltersDto): ConclusionFiltersDto {
+  const text = (input: string | undefined): string | undefined => {
+    const trimmed = String(input || "").trim();
+    return trimmed || undefined;
+  };
+  return {
+    observer_id: text(value.observer_id),
+    observed_id: text(value.observed_id),
+    session_id: text(value.session_id),
+    level: value.level,
+    query: text(value.query),
+  };
+}
+
+function displayBytes(value: number): string {
+  const bytes = Math.max(0, Number(value) || 0);
+  if (bytes < 1024) return Math.trunc(bytes) + " B";
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+  return (bytes / (1024 * 1024)).toFixed(1) + " MB";
 }
 
 export default function honchoExploreScreen(ctx: ComposeDslContext): ComposeNode {
@@ -164,6 +189,59 @@ export default function honchoExploreScreen(ctx: ComposeDslContext): ComposeNode
     "conclusions",
     emptyPage<ConclusionDto>()
   );
+  const [conclusionPeers, setConclusionPeers] = ctx.useState<ExplorerPage<PeerDto>>(
+    "conclusionPeers",
+    emptyPage<PeerDto>(100)
+  );
+  const [conclusionDraftFilters, setConclusionDraftFilters] = ctx.useState<ConclusionFiltersDto>(
+    "conclusionDraftFilters",
+    {}
+  );
+  const [conclusionFilters, setConclusionFilters] = ctx.useState<ConclusionFiltersDto>(
+    "conclusionFilters",
+    {}
+  );
+  const [conclusionObserverMenuOpen, setConclusionObserverMenuOpen] = ctx.useState(
+    "conclusionObserverMenuOpen",
+    false
+  );
+  const [conclusionObservedMenuOpen, setConclusionObservedMenuOpen] = ctx.useState(
+    "conclusionObservedMenuOpen",
+    false
+  );
+  const [conclusionLevelMenuOpen, setConclusionLevelMenuOpen] = ctx.useState(
+    "conclusionLevelMenuOpen",
+    false
+  );
+  const [conclusionDuplicateReport, setConclusionDuplicateReport] =
+    ctx.useState<ConclusionDuplicateReportDto | null>("conclusionDuplicateReport", null);
+  const [selectedDuplicateGroupKey, setSelectedDuplicateGroupKey] = ctx.useState(
+    "selectedDuplicateGroupKey",
+    ""
+  );
+  const [keepConclusionId, setKeepConclusionId] = ctx.useState("keepConclusionId", "");
+  const [conclusionCleanupPreview, setConclusionCleanupPreview] =
+    ctx.useState<ConclusionCleanupPreviewDto | null>("conclusionCleanupPreview", null);
+  const [conclusionConfirmationText, setConclusionConfirmationText] = ctx.useState(
+    "conclusionConfirmationText",
+    ""
+  );
+  const [conclusionBusy, setConclusionBusy] = ctx.useState("conclusionBusy", false);
+  const [conclusionNotice, setConclusionNotice] = ctx.useState("conclusionNotice", "");
+  const [conclusionError, setConclusionError] = ctx.useState("conclusionError", "");
+  const [sidecarStatus, setSidecarStatus] = ctx.useState<PromptSidecarStatusDto | null>(
+    "sidecarStatus",
+    null
+  );
+  const [sidecarClearPreview, setSidecarClearPreview] =
+    ctx.useState<PromptSidecarClearPreviewDto | null>("sidecarClearPreview", null);
+  const [sidecarConfirmationText, setSidecarConfirmationText] = ctx.useState(
+    "sidecarConfirmationText",
+    ""
+  );
+  const [sidecarBusy, setSidecarBusy] = ctx.useState("sidecarBusy", false);
+  const [sidecarNotice, setSidecarNotice] = ctx.useState("sidecarNotice", "");
+  const [sidecarError, setSidecarError] = ctx.useState("sidecarError", "");
   const [loading, setLoading] = ctx.useState("loading", false);
   const [hasLoaded, setHasLoaded] = ctx.useState("hasLoaded", false);
   const [error, setError] = ctx.useState<ExplorerError | null>("error", null);
@@ -189,6 +267,12 @@ export default function honchoExploreScreen(ctx: ComposeDslContext): ComposeNode
       userPeerId?: string;
       aiPeerId?: string;
       confirmationToken?: string;
+      forceRefresh?: boolean;
+      query?: string;
+      conclusionLevel?: ConclusionFiltersDto["level"];
+      keepConclusionId?: string;
+      deleteConclusionIds?: string[];
+      confirmationText?: string;
     }
   ): Promise<T> {
     requestSequence.current += 1;
@@ -205,7 +289,13 @@ export default function honchoExploreScreen(ctx: ComposeDslContext): ComposeNode
     return response.data as T;
   }
 
-  async function load(targetTab: ExplorerTab, workspace = "", page = 1): Promise<void> {
+  async function load(
+    targetTab: ExplorerTab,
+    workspace = "",
+    page = 1,
+    forceRefresh = false,
+    conclusionFilterOverride?: ConclusionFiltersDto
+  ): Promise<void> {
     loadVersion.current += 1;
     const version = loadVersion.current;
     setLoading(true);
@@ -220,6 +310,14 @@ export default function honchoExploreScreen(ctx: ComposeDslContext): ComposeNode
       if (targetWorkspace !== browsingWorkspace) setBrowsingWorkspace(targetWorkspace);
 
       if (!nextStatus.configured) {
+        if (targetTab === "overview") {
+          try {
+            setSidecarStatus(await remote<PromptSidecarStatusDto>("sidecar_status"));
+            setSidecarError("");
+          } catch (sidecarFailure) {
+            setSidecarError(uiError(sidecarFailure).message);
+          }
+        }
         setHasLoaded(true);
         return;
       }
@@ -228,13 +326,19 @@ export default function honchoExploreScreen(ctx: ComposeDslContext): ComposeNode
         const results = await Promise.allSettled([
           remote<WorkspaceIdentityDto>("identity_status"),
           remote<QueueStatusDto>("queue_status", targetWorkspace),
-          remote<ExplorerPage<WorkspaceDto>>("list_workspaces", undefined, { page: 1, size: 20 }),
-          remote<ExplorerPage<PeerDto>>("list_peers", targetWorkspace, { page: 1, size: 5, reverse: true }),
+          remote<ExplorerPage<WorkspaceDto>>("list_workspaces", undefined, {
+            page: 1, size: 20, forceRefresh,
+          }),
+          remote<ExplorerPage<PeerDto>>("list_peers", targetWorkspace, {
+            page: 1, size: 5, reverse: true, forceRefresh,
+          }),
           remote<ExplorerPage<SessionDto>>("list_sessions", targetWorkspace, {
             page: 1,
             size: 5,
             reverse: true,
+            forceRefresh,
           }),
+          remote<PromptSidecarStatusDto>("sidecar_status"),
         ]);
         if (version !== loadVersion.current) return;
         const identityResult = results[0] as PromiseSettledResult<WorkspaceIdentityDto>;
@@ -242,6 +346,7 @@ export default function honchoExploreScreen(ctx: ComposeDslContext): ComposeNode
         const workspaceResult = results[2] as PromiseSettledResult<ExplorerPage<WorkspaceDto>>;
         const peerResult = results[3] as PromiseSettledResult<ExplorerPage<PeerDto>>;
         const sessionResult = results[4] as PromiseSettledResult<ExplorerPage<SessionDto>>;
+        const sidecarResult = results[5] as PromiseSettledResult<PromptSidecarStatusDto>;
         const nextStatusWithQueue: ExplorerStatusDto = { ...nextStatus };
         if (identityResult.status === "fulfilled") {
           setIdentity(identityResult.value);
@@ -266,7 +371,13 @@ export default function honchoExploreScreen(ctx: ComposeDslContext): ComposeNode
         if (workspaceResult.status === "fulfilled") setWorkspaces(workspaceResult.value);
         if (peerResult.status === "fulfilled") setPeers(peerResult.value);
         if (sessionResult.status === "fulfilled") setSessions(sessionResult.value);
-        const failures = [identityResult, workspaceResult, peerResult, sessionResult]
+        if (sidecarResult.status === "fulfilled") {
+          setSidecarStatus(sidecarResult.value);
+          setSidecarError("");
+        } else {
+          setSidecarError(uiError(sidecarResult.reason).message);
+        }
+        const failures = [identityResult, workspaceResult, peerResult, sessionResult, sidecarResult]
           .filter((result) => result.status === "rejected")
           .map((result) => uiError((result as PromiseRejectedResult).reason));
         if (failures.length) {
@@ -278,7 +389,7 @@ export default function honchoExploreScreen(ctx: ComposeDslContext): ComposeNode
         const peerPage = await remote<ExplorerPage<PeerDto>>(
           "list_peers",
           targetWorkspace,
-          { page, size: 20, reverse: true }
+          { page, size: 20, reverse: true, forceRefresh }
         );
         setPeers(peerPage);
         if (targetWorkspace === nextStatus.workspace) {
@@ -294,13 +405,30 @@ export default function honchoExploreScreen(ctx: ComposeDslContext): ComposeNode
           }
         }
       } else if (targetTab === "sessions") {
-        setSessions(await remote("list_sessions", targetWorkspace, { page, size: 20, reverse: true }));
-      } else {
-        setConclusions(await remote("list_conclusions", targetWorkspace, {
-          page,
-          size: 20,
-          reverse: false,
+        setSessions(await remote("list_sessions", targetWorkspace, {
+          page, size: 20, reverse: true, forceRefresh,
         }));
+      } else {
+        const filters = conclusionFilterOverride || conclusionFilters;
+        const [conclusionPage, peerPage] = await Promise.all([
+          remote<ExplorerPage<ConclusionDto>>("list_conclusions", targetWorkspace, {
+            page: filters.query ? 1 : page,
+            size: 20,
+            reverse: true,
+            observerPeerId: filters.observer_id,
+            targetPeerId: filters.observed_id,
+            sessionId: filters.session_id,
+            conclusionLevel: filters.level,
+            query: filters.query,
+            forceRefresh,
+          }),
+          remote<ExplorerPage<PeerDto>>("list_peers", targetWorkspace, {
+            page: 1, size: 100, reverse: false, forceRefresh,
+          }),
+        ]);
+        if (version !== loadVersion.current) return;
+        setConclusions(conclusionPage);
+        setConclusionPeers(peerPage);
       }
       if (version === loadVersion.current) setHasLoaded(true);
     } catch (caught) {
@@ -313,7 +441,7 @@ export default function honchoExploreScreen(ctx: ComposeDslContext): ComposeNode
     }
   }
 
-  async function loadMessages(sessionId: string, page = 1): Promise<void> {
+  async function loadMessages(sessionId: string, page = 1, forceRefresh = false): Promise<void> {
     loadVersion.current += 1;
     const version = loadVersion.current;
     setLoading(true);
@@ -331,7 +459,7 @@ export default function honchoExploreScreen(ctx: ComposeDslContext): ComposeNode
       const pageResult = await remote<ExplorerPage<MessageDto>>(
         "list_messages",
         workspaceId,
-        { page, size: 30, reverse: false, sessionId }
+        { page, size: 30, reverse: false, sessionId, forceRefresh }
       );
       if (version !== loadVersion.current) return;
       setMessages(pageResult);
@@ -357,7 +485,14 @@ export default function honchoExploreScreen(ctx: ComposeDslContext): ComposeNode
       setPeerMutationPreview(null);
       setIdentityPreview(null);
     }
-    return load(nextTab, browsingWorkspace, 1);
+    const page = nextTab === "peers"
+      ? peers.page
+      : nextTab === "sessions"
+        ? sessions.page
+        : nextTab === "conclusions"
+          ? conclusions.page
+          : 1;
+    return load(nextTab, browsingWorkspace, page || 1);
   }
 
   function selectWorkspace(workspaceId: string): Promise<void> {
@@ -380,7 +515,7 @@ export default function honchoExploreScreen(ctx: ComposeDslContext): ComposeNode
     return load("sessions", browsingWorkspace, sessions.page || 1);
   }
 
-  async function refreshPeerCard(observerId = peerCardObserver): Promise<void> {
+  async function refreshPeerCard(observerId = peerCardObserver, forceRefresh = false): Promise<void> {
     if (!selectedPeer || !observerId) return;
     setPeerBusy(true);
     setPeerCardError("");
@@ -388,6 +523,7 @@ export default function honchoExploreScreen(ctx: ComposeDslContext): ComposeNode
       const value = await remote<PeerCardDto>("get_peer_card", browsingWorkspace, {
         observerPeerId: observerId,
         targetPeerId: selectedPeer.id,
+        forceRefresh,
       });
       setPeerCardObserver(observerId);
       setPeerCard(value);
@@ -399,7 +535,12 @@ export default function honchoExploreScreen(ctx: ComposeDslContext): ComposeNode
     }
   }
 
-  async function loadPeerDetail(peerId: string, observerOverride = "", sessionPage = 1): Promise<void> {
+  async function loadPeerDetail(
+    peerId: string,
+    observerOverride = "",
+    sessionPage = 1,
+    forceRefresh = false
+  ): Promise<void> {
     const workspaceId = browsingWorkspace || status?.workspace || "";
     if (!workspaceId) return;
     const observerId = observerOverride
@@ -415,12 +556,13 @@ export default function honchoExploreScreen(ctx: ComposeDslContext): ComposeNode
     setIdentityPreview(null);
     try {
       const [detail, related] = await Promise.all([
-        remote<PeerDto>("get_peer", workspaceId, { peerId }),
+        remote<PeerDto>("get_peer", workspaceId, { peerId, forceRefresh }),
         remote<ExplorerPage<SessionDto>>("list_peer_sessions", workspaceId, {
           peerId,
           page: sessionPage,
           size: 20,
           reverse: true,
+          forceRefresh,
         }),
       ]);
       setSelectedPeer(detail);
@@ -432,6 +574,7 @@ export default function honchoExploreScreen(ctx: ComposeDslContext): ComposeNode
           setPeerCard(await remote<PeerCardDto>("get_peer_card", workspaceId, {
             observerPeerId: observerId,
             targetPeerId: peerId,
+            forceRefresh,
           }));
         } catch (cardFailure) {
           setPeerCard(null);
@@ -637,6 +780,186 @@ export default function honchoExploreScreen(ctx: ComposeDslContext): ComposeNode
     }
   }
 
+  function resetConclusionCleanup(): void {
+    setConclusionDuplicateReport(null);
+    setSelectedDuplicateGroupKey("");
+    setKeepConclusionId("");
+    setConclusionCleanupPreview(null);
+    setConclusionConfirmationText("");
+  }
+
+  async function applyConclusionFilters(): Promise<void> {
+    const next = normalizedConclusionFilters(conclusionDraftFilters);
+    setConclusionDraftFilters(next);
+    setConclusionFilters(next);
+    setConclusionNotice("");
+    setConclusionError("");
+    resetConclusionCleanup();
+    await load("conclusions", browsingWorkspace, 1, true, next);
+  }
+
+  async function clearConclusionFilters(): Promise<void> {
+    const next: ConclusionFiltersDto = {};
+    setConclusionDraftFilters(next);
+    setConclusionFilters(next);
+    setConclusionNotice("");
+    setConclusionError("");
+    resetConclusionCleanup();
+    await load("conclusions", browsingWorkspace, 1, true, next);
+  }
+
+  async function scanConclusionDuplicates(): Promise<void> {
+    const workspaceId = browsingWorkspace || status?.workspace || "";
+    if (!workspaceId) return;
+    setConclusionBusy(true);
+    setConclusionError("");
+    setConclusionNotice("");
+    setConclusionCleanupPreview(null);
+    setConclusionConfirmationText("");
+    try {
+      const report = await remote<ConclusionDuplicateReportDto>(
+        "scan_conclusion_duplicates",
+        workspaceId,
+        {
+          observerPeerId: conclusionFilters.observer_id,
+          targetPeerId: conclusionFilters.observed_id,
+          sessionId: conclusionFilters.session_id,
+          conclusionLevel: conclusionFilters.level,
+          forceRefresh: true,
+        }
+      );
+      setConclusionDuplicateReport(report);
+      setSelectedDuplicateGroupKey("");
+      setKeepConclusionId("");
+      setConclusionNotice(
+        (conclusionFilters.query ? "语义搜索文字不参与精确重复扫描。" : "")
+        + "已扫描 " + report.scanned_count + " 条结论。"
+      );
+    } catch (caught) {
+      setConclusionError(uiError(caught).message);
+    } finally {
+      setConclusionBusy(false);
+    }
+  }
+
+  function selectConclusionDuplicateGroup(group: ConclusionDuplicateGroupDto): void {
+    setSelectedDuplicateGroupKey(group.group_key);
+    setKeepConclusionId(group.earliest_id);
+    setConclusionCleanupPreview(null);
+    setConclusionConfirmationText("");
+    setConclusionError("");
+  }
+
+  async function prepareConclusionCleanup(group: ConclusionDuplicateGroupDto): Promise<void> {
+    const deleteConclusionIds = group.items
+      .map((item) => item.id)
+      .filter((id) => id !== keepConclusionId);
+    if (!keepConclusionId || !deleteConclusionIds.length) return;
+    setConclusionBusy(true);
+    setConclusionError("");
+    setConclusionNotice("");
+    try {
+      const preview = await remote<ConclusionCleanupPreviewDto>(
+        "prepare_conclusion_cleanup",
+        browsingWorkspace,
+        {
+          keepConclusionId,
+          deleteConclusionIds,
+          observerPeerId: conclusionFilters.observer_id,
+          targetPeerId: conclusionFilters.observed_id,
+          sessionId: conclusionFilters.session_id,
+          conclusionLevel: conclusionFilters.level,
+        }
+      );
+      setConclusionCleanupPreview(preview);
+      setConclusionConfirmationText("");
+    } catch (caught) {
+      setConclusionError(uiError(caught).message);
+    } finally {
+      setConclusionBusy(false);
+    }
+  }
+
+  async function commitConclusionCleanup(): Promise<void> {
+    const preview = conclusionCleanupPreview;
+    if (!preview) return;
+    setConclusionBusy(true);
+    setConclusionError("");
+    setConclusionNotice("");
+    try {
+      const result = await remote<ConclusionCleanupResultDto>(
+        "commit_conclusion_cleanup",
+        preview.workspace_id,
+        {
+          keepConclusionId: preview.keep_conclusion_id,
+          deleteConclusionIds: preview.delete_conclusion_ids,
+          confirmationToken: preview.confirmation_token,
+          confirmationText: conclusionConfirmationText,
+        }
+      );
+      setConclusionCleanupPreview(null);
+      setConclusionConfirmationText("");
+      const cleanupNotice = result.failures.length
+        ? "已删除 " + result.deleted_ids.length + " 条；失败 "
+          + clipText(result.failures.map((item) => item.id).join(", "), 320)
+          + "。可重新扫描后重试。"
+        : "已删除 " + result.deleted_ids.length + " 条重复结论。";
+      await load("conclusions", browsingWorkspace, 1, true, conclusionFilters);
+      await scanConclusionDuplicates();
+      setConclusionNotice(cleanupNotice);
+      await ctx.showToast("Honcho 重复结论清理已执行");
+    } catch (caught) {
+      setConclusionCleanupPreview(null);
+      setConclusionConfirmationText("");
+      setConclusionError(uiError(caught).message);
+    } finally {
+      setConclusionBusy(false);
+    }
+  }
+
+  async function prepareSidecarClear(): Promise<void> {
+    setSidecarBusy(true);
+    setSidecarError("");
+    setSidecarNotice("");
+    try {
+      setSidecarClearPreview(await remote<PromptSidecarClearPreviewDto>("prepare_sidecar_clear"));
+      setSidecarConfirmationText("");
+    } catch (caught) {
+      setSidecarClearPreview(null);
+      setSidecarConfirmationText("");
+      setSidecarError(uiError(caught).message);
+    } finally {
+      setSidecarBusy(false);
+    }
+  }
+
+  async function commitSidecarClear(): Promise<void> {
+    const preview = sidecarClearPreview;
+    if (!preview) return;
+    setSidecarBusy(true);
+    setSidecarError("");
+    setSidecarNotice("");
+    try {
+      const result = await remote<PromptSidecarClearResultDto>("commit_sidecar_clear", undefined, {
+        confirmationToken: preview.confirmation_token,
+        confirmationText: sidecarConfirmationText,
+      });
+      setSidecarClearPreview(null);
+      setSidecarConfirmationText("");
+      setSidecarNotice(
+        "已清除 " + result.deleted_files + " 个 sidecar 文件（" + result.deleted_bytes + " 字节）。"
+      );
+      setSidecarStatus(await remote<PromptSidecarStatusDto>("sidecar_status"));
+      await ctx.showToast("Honcho Prompt sidecar 已清除");
+    } catch (caught) {
+      setSidecarClearPreview(null);
+      setSidecarConfirmationText("");
+      setSidecarError(uiError(caught).message);
+    } finally {
+      setSidecarBusy(false);
+    }
+  }
+
   function sectionTitle(title: string, subtitle = ""): ComposeNode {
     return UI.Column({ fillMaxWidth: true, spacing: 2, paddingTop: 6 }, [
       UI.Text({ text: title, style: "titleMedium", color: colors.onSurface, fontWeight: "bold" }),
@@ -738,6 +1061,114 @@ export default function honchoExploreScreen(ctx: ComposeDslContext): ComposeNode
     );
   }
 
+  function renderSidecarMaintenance(): ComposeNode[] {
+    const nodes: ComposeNode[] = [
+      UI.HorizontalDivider({ color: colors.outlineVariant }),
+      sectionTitle("Prompt sidecar", "插件私有模型请求历史"),
+    ];
+    if (sidecarError) {
+      nodes.push(UI.Surface({
+        fillMaxWidth: true,
+        padding: 10,
+        shape: { type: "rounded", cornerRadius: 8 },
+        containerColor: colors.errorContainer,
+      }, [UI.Text({
+        text: sidecarError,
+        style: "bodySmall",
+        color: colors.onErrorContainer,
+        softWrap: true,
+      })]));
+    }
+    if (sidecarNotice) {
+      nodes.push(UI.Surface({
+        fillMaxWidth: true,
+        padding: 10,
+        shape: { type: "rounded", cornerRadius: 8 },
+        containerColor: colors.secondaryContainer,
+      }, [UI.Text({
+        text: sidecarNotice,
+        style: "bodySmall",
+        color: colors.onSecondaryContainer,
+        softWrap: true,
+      })]));
+    }
+    nodes.push(UI.Surface({
+      fillMaxWidth: true,
+      padding: 10,
+      shape: { type: "rounded", cornerRadius: 8 },
+      containerColor: colors.surfaceVariant,
+    }, [UI.Row({ fillMaxWidth: true, spacing: 8, verticalAlignment: "center" }, [
+      UI.Icon({ name: "history", size: 20, tint: colors.primary }),
+      UI.Column({ weight: 1, spacing: 2 }, [
+        UI.Text({
+          text: sidecarStatus
+            ? sidecarStatus.file_count + " 个文件 · " + displayBytes(sidecarStatus.total_bytes)
+            : "状态不可用",
+          style: "bodyMedium",
+          color: colors.onSurface,
+        }),
+        sidecarStatus
+          ? UI.Text({
+              text: "容量上限 " + displayBytes(sidecarStatus.max_bytes),
+              style: "labelSmall",
+              color: colors.onSurfaceVariant,
+            })
+          : null,
+      ].filter(Boolean) as ComposeNode[]),
+      UI.OutlinedButton({
+        enabled: !sidecarBusy && Boolean(sidecarStatus?.file_count),
+        onClick: prepareSidecarClear,
+      }, [UI.Row({ spacing: 5, verticalAlignment: "center" }, [
+        UI.Icon({ name: "delete_sweep", size: 18, tint: colors.error }),
+        UI.Text({ text: "清除", style: "labelLarge", color: colors.error }),
+      ])]),
+    ])]));
+
+    if (sidecarClearPreview) {
+      nodes.push(UI.Surface({
+        fillMaxWidth: true,
+        padding: 12,
+        shape: { type: "rounded", cornerRadius: 8 },
+        containerColor: colors.errorContainer,
+      }, [UI.Column({ fillMaxWidth: true, spacing: 7 }, [
+        UI.Text({
+          text: "确认清除 Prompt sidecar",
+          style: "titleSmall",
+          color: colors.onErrorContainer,
+          fontWeight: "bold",
+        }),
+        UI.Text({
+          text: sidecarClearPreview.file_count + " 个文件 · " + displayBytes(sidecarClearPreview.total_bytes),
+          style: "bodySmall",
+          color: colors.onErrorContainer,
+        }),
+        UI.TextField({
+          value: sidecarConfirmationText,
+          onValueChange: setSidecarConfirmationText,
+          label: "输入 " + sidecarClearPreview.confirmation_phrase,
+          singleLine: true,
+          fillMaxWidth: true,
+        }),
+        UI.Row({ fillMaxWidth: true, spacing: 8, horizontalArrangement: "end" }, [
+          UI.OutlinedButton({
+            enabled: !sidecarBusy,
+            onClick: () => {
+              setSidecarClearPreview(null);
+              setSidecarConfirmationText("");
+            },
+          }, [UI.Text({ text: "取消", style: "labelLarge", color: colors.primary })]),
+          UI.Button({
+            text: "确认清除",
+            enabled: !sidecarBusy
+              && sidecarConfirmationText === sidecarClearPreview.confirmation_phrase,
+            onClick: commitSidecarClear,
+          }),
+        ]),
+      ])]));
+    }
+    return nodes;
+  }
+
   function renderOverview(): ComposeNode[] {
     if (!status) return [];
     if (!status.configured) {
@@ -761,6 +1192,7 @@ export default function honchoExploreScreen(ctx: ComposeDslContext): ComposeNode
             ]),
           ]
         ),
+        ...renderSidecarMaintenance(),
       ];
     }
 
@@ -900,6 +1332,7 @@ export default function honchoExploreScreen(ctx: ComposeDslContext): ComposeNode
       ], `overview-session-${session.id}`, () => openSession(session.id)));
     }
     if (!sessions.items.length) nodes.push(emptyState("会话"));
+    nodes.push(...renderSidecarMaintenance());
     return nodes;
   }
 
@@ -977,7 +1410,7 @@ export default function honchoExploreScreen(ctx: ComposeDslContext): ComposeNode
         await refreshPeerCard(peerId);
       },
       onRefreshCard: () => selectedPeer
-        ? loadPeerDetail(selectedPeer.id, peerCardObserver)
+        ? loadPeerDetail(selectedPeer.id, peerCardObserver, peerSessions.page || 1, true)
         : Promise.resolve(),
     });
   }
@@ -1048,34 +1481,61 @@ export default function honchoExploreScreen(ctx: ComposeDslContext): ComposeNode
   }
 
   function renderConclusions(): ComposeNode[] {
-    const nodes: ComposeNode[] = [sectionTitle("结论", `${browsingWorkspace} 中共 ${conclusions.total} 条`)];
-    if (!conclusions.items.length) nodes.push(emptyState("结论"));
-    for (const conclusion of conclusions.items) {
-      const scope = [conclusion.observer_id, conclusion.observed_id]
-        .filter(Boolean)
-        .join(" → ");
-      nodes.push(entityCard(clipText(conclusion.content, 220), [
-        UI.Text({
-          text: `${conclusionLevel(conclusion.level)}${scope ? `  ·  ${scope}` : ""}`,
-          style: "bodySmall",
-          color: colors.onSurfaceVariant,
-          maxLines: 2,
-          overflow: "ellipsis",
-        }),
-        UI.Text({ text: displayTime(conclusion.created_at), style: "labelSmall", color: colors.onSurfaceVariant }),
-      ], `conclusion-${conclusion.id}`));
-    }
-    const pagination = pager(conclusions, (page) => load("conclusions", browsingWorkspace, page));
-    if (pagination) nodes.push(pagination);
-    return nodes;
+    const activeIdentity = browsingWorkspace === status?.workspace;
+    return renderConclusionWorkspace(ctx, {
+      workspaceId: browsingWorkspace,
+      activeWorkspace: status?.workspace || "",
+      page: conclusions,
+      peers: conclusionPeers.items,
+      userPeerId: activeIdentity ? (identity?.user_peer || status?.user_peer || "") : "",
+      aiPeerId: activeIdentity ? (identity?.ai_peer || status?.ai_peer || "") : "",
+      draftFilters: conclusionDraftFilters,
+      appliedFilters: conclusionFilters,
+      observerMenuOpen: conclusionObserverMenuOpen,
+      observedMenuOpen: conclusionObservedMenuOpen,
+      levelMenuOpen: conclusionLevelMenuOpen,
+      duplicateReport: conclusionDuplicateReport,
+      selectedDuplicateGroupKey,
+      keepConclusionId,
+      cleanupPreview: conclusionCleanupPreview,
+      confirmationText: conclusionConfirmationText,
+      busy: conclusionBusy || loading,
+      notice: conclusionNotice,
+      error: conclusionError,
+      onDraftFiltersChange: (filters) => {
+        setConclusionDraftFilters(filters);
+        setConclusionCleanupPreview(null);
+        setConclusionConfirmationText("");
+      },
+      onObserverMenuChange: setConclusionObserverMenuOpen,
+      onObservedMenuChange: setConclusionObservedMenuOpen,
+      onLevelMenuChange: setConclusionLevelMenuOpen,
+      onApplyFilters: applyConclusionFilters,
+      onClearFilters: clearConclusionFilters,
+      onPage: (page) => load("conclusions", browsingWorkspace, page, false, conclusionFilters),
+      onScanDuplicates: scanConclusionDuplicates,
+      onSelectDuplicateGroup: selectConclusionDuplicateGroup,
+      onKeepConclusionChange: (id) => {
+        setKeepConclusionId(id);
+        setConclusionCleanupPreview(null);
+        setConclusionConfirmationText("");
+      },
+      onPrepareCleanup: prepareConclusionCleanup,
+      onCommitCleanup: commitConclusionCleanup,
+      onCancelCleanup: () => {
+        setConclusionCleanupPreview(null);
+        setConclusionConfirmationText("");
+      },
+      onConfirmationTextChange: setConclusionConfirmationText,
+    });
   }
 
   function refreshCurrent(): Promise<void> {
     if (tab === "peers" && selectedPeer) {
-      return loadPeerDetail(selectedPeer.id, peerCardObserver);
+      return loadPeerDetail(selectedPeer.id, peerCardObserver, peerSessions.page || 1, true);
     }
     if (tab === "sessions" && selectedSessionId) {
-      return loadMessages(selectedSessionId, messages.page || 1);
+      return loadMessages(selectedSessionId, messages.page || 1, true);
     }
     const page = tab === "peers"
       ? peers.page
@@ -1084,7 +1544,7 @@ export default function honchoExploreScreen(ctx: ComposeDslContext): ComposeNode
         : tab === "conclusions"
           ? conclusions.page
           : 1;
-    return load(tab, browsingWorkspace, page);
+    return load(tab, browsingWorkspace, page, true);
   }
 
   const selectedTabIndex = Math.max(0, TABS.findIndex((item) => item.id === tab));
@@ -1161,7 +1621,8 @@ export default function honchoExploreScreen(ctx: ComposeDslContext): ComposeNode
         UI.Button({ text: "重试", enabled: !loading, onClick: refreshCurrent }),
       ])]
     ));
-  } else if (loading && !hasLoaded) {
+  }
+  if (loading && !hasLoaded) {
     items.push(UI.Column(
       { fillMaxWidth: true, horizontalAlignment: "center", padding: 32, spacing: 8 },
       [UI.CircularProgressIndicator({}), UI.Text({ text: "正在加载 Honcho...", color: colors.onSurfaceVariant })]

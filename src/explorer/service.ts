@@ -13,8 +13,14 @@ import {
 } from "../api";
 import { configSignature, HonchoConfig, isConfigured } from "../config";
 import { metadataWithPeerProfile, peerArchived, peerDisplayName } from "../identity";
+import { buildConclusionDuplicateGroups } from "./conclusions";
 import {
+  ConclusionCleanupPreviewDto,
+  ConclusionCleanupResultDto,
+  ConclusionDuplicateGroupDto,
+  ConclusionDuplicateReportDto,
   ConclusionDto,
+  ConclusionFiltersDto,
   ExplorerError,
   ExplorerPage,
   ExplorerRequest,
@@ -26,6 +32,9 @@ import {
   PeerMutationKind,
   PeerMutationPreviewDto,
   PeerMutationResultDto,
+  PromptSidecarClearPreviewDto,
+  PromptSidecarClearResultDto,
+  PromptSidecarStatusDto,
   QueueStatusDto,
   SessionDto,
   WorkspaceDto,
@@ -74,8 +83,16 @@ interface ExplorerApi {
     workspaceId: string,
     page: number,
     size: number,
-    reverse: boolean
+    reverse: boolean,
+    filters?: JsonRecord
   ): Promise<HonchoPage<Conclusion>>;
+  queryConclusionsGeneric(
+    workspaceId: string,
+    query: string,
+    topK: number,
+    filters?: JsonRecord
+  ): Promise<Conclusion[]>;
+  deleteConclusionFor(workspaceId: string, id: string): Promise<void>;
   getQueueStatus(workspaceId: string): Promise<HonchoQueueStatus>;
   setWorkspaceIdentity(userPeerId: string, aiPeerId: string): Promise<WorkspaceIdentityStatus>;
 }
@@ -104,8 +121,42 @@ interface PendingPeerMutation {
   expiresAt: number;
 }
 
+interface PendingConclusionCleanup {
+  configSignature: string;
+  workspaceId: string;
+  groupKey: string;
+  filters: JsonRecord;
+  keepConclusionId: string;
+  deleteConclusionIds: string[];
+  confirmationPhrase: string;
+  expiresAt: number;
+}
+
+interface PendingSidecarClear {
+  fileCount: number;
+  totalBytes: number;
+  confirmationPhrase: string;
+  expiresAt: number;
+}
+
+interface SidecarMaintenance {
+  status(): Promise<PromptSidecarStatusDto>;
+  clear(): Promise<PromptSidecarClearResultDto>;
+}
+
+interface ReadCacheEntry {
+  workspaceId: string;
+  operation: string;
+  expiresAt: number;
+  value: unknown;
+}
+
 const IDENTITY_CONFIRMATION_TTL_MS = 5 * 60 * 1000;
 const PEER_CONFIRMATION_TTL_MS = 5 * 60 * 1000;
+const CONCLUSION_CONFIRMATION_TTL_MS = 5 * 60 * 1000;
+const SIDECAR_CONFIRMATION_TTL_MS = 5 * 60 * 1000;
+const EXPLORER_READ_CACHE_TTL_MS = 30 * 1000;
+const MAX_CONCLUSION_SCAN_ITEMS = 5000;
 
 type ApiFactory = (config: HonchoConfig) => ExplorerApi;
 
@@ -153,6 +204,15 @@ function requestIdFrom(value: unknown): string {
   return typeof requestId === "string" && requestId.trim()
     ? requestId.trim().slice(0, 128)
     : "invalid-request";
+}
+
+function resultItemCount(value: unknown): number {
+  if (Array.isArray(value)) return value.length;
+  if (!value || typeof value !== "object") return 0;
+  const record = value as Record<string, unknown>;
+  if (Array.isArray(record.items)) return record.items.length;
+  if (Array.isArray(record.groups)) return record.groups.length;
+  return 0;
 }
 
 function statusDto(value: JsonRecord): ExplorerStatusDto {
@@ -232,6 +292,41 @@ function queueStatusDto(value: HonchoQueueStatus): QueueStatusDto {
   };
 }
 
+function conclusionFilterValues(request: ExplorerRequest): ConclusionFiltersDto {
+  return {
+    observer_id: request.params?.observerPeerId,
+    observed_id: request.params?.targetPeerId,
+    session_id: request.params?.sessionId,
+    level: request.params?.conclusionLevel,
+    query: request.params?.query,
+  };
+}
+
+function conclusionApiFilters(filters: ConclusionFiltersDto): JsonRecord {
+  const result: JsonRecord = {};
+  if (filters.observer_id) result.observer_id = filters.observer_id;
+  if (filters.observed_id) result.observed_id = filters.observed_id;
+  if (filters.session_id) result.session_id = filters.session_id;
+  if (filters.level) result.level = filters.level;
+  return result;
+}
+
+function conclusionDto(value: Conclusion, names: Map<string, string>): ConclusionDto {
+  const observerId = stringValue(value.observer_id);
+  const observedId = stringValue(value.observed_id);
+  return {
+    id: stringValue(value.id),
+    content: stringValue(value.content),
+    observer_id: observerId || undefined,
+    observer_display_name: names.get(observerId) || undefined,
+    observed_id: observedId || undefined,
+    observed_display_name: names.get(observedId) || undefined,
+    session_id: value.session_id,
+    level: value.level,
+    created_at: value.created_at,
+  };
+}
+
 export class ExplorerService {
   private api: ExplorerApi | null = null;
   private signature = "";
@@ -241,10 +336,17 @@ export class ExplorerService {
   private identityConfirmationSequence = 0;
   private readonly peerConfirmations = new Map<string, PendingPeerMutation>();
   private peerConfirmationSequence = 0;
+  private readonly conclusionConfirmations = new Map<string, PendingConclusionCleanup>();
+  private conclusionConfirmationSequence = 0;
+  private readonly sidecarConfirmations = new Map<string, PendingSidecarClear>();
+  private sidecarConfirmationSequence = 0;
+  private readonly readCache = new Map<string, ReadCacheEntry>();
+  private readonly readInFlight = new Map<string, Promise<unknown>>();
 
   constructor(
     private readonly controller: ExplorerController,
-    private readonly apiFactory: ApiFactory = (config) => new HonchoApi(config)
+    private readonly apiFactory: ApiFactory = (config) => new HonchoApi(config),
+    private readonly sidecarMaintenance?: SidecarMaintenance
   ) {}
 
   private currentApi(config: HonchoConfig): ExplorerApi {
@@ -256,6 +358,9 @@ export class ExplorerService {
       this.queueInFlight.clear();
       this.identityConfirmations.clear();
       this.peerConfirmations.clear();
+      this.conclusionConfirmations.clear();
+      this.readCache.clear();
+      this.readInFlight.clear();
     }
     return this.api;
   }
@@ -284,6 +389,53 @@ export class ExplorerService {
       });
     this.queueInFlight.set(key, request);
     return request;
+  }
+
+  private readCacheKey(
+    config: HonchoConfig,
+    request: ExplorerRequest,
+    workspaceId: string
+  ): string {
+    const params = { ...(request.params || {}) };
+    delete params.forceRefresh;
+    return JSON.stringify([configSignature(config), workspaceId, request.op, params]);
+  }
+
+  private cachedRead<T>(
+    config: HonchoConfig,
+    request: ExplorerRequest,
+    workspaceId: string,
+    load: () => Promise<T>
+  ): Promise<T> {
+    const key = this.readCacheKey(config, request, workspaceId);
+    const now = Date.now();
+    const cached = this.readCache.get(key);
+    if (!request.params?.forceRefresh && cached && cached.expiresAt > now) {
+      return Promise.resolve(cached.value as T);
+    }
+    const active = this.readInFlight.get(key);
+    if (active) return active as Promise<T>;
+
+    const pending = load()
+      .then((value) => {
+        this.readCache.set(key, {
+          workspaceId,
+          operation: request.op,
+          expiresAt: Date.now() + EXPLORER_READ_CACHE_TTL_MS,
+          value,
+        });
+        return value;
+      })
+      .finally(() => this.readInFlight.delete(key));
+    this.readInFlight.set(key, pending as Promise<unknown>);
+    return pending;
+  }
+
+  private invalidateReadCache(workspaceId: string, operations?: string[]): void {
+    for (const [key, entry] of this.readCache.entries()) {
+      if (entry.workspaceId !== workspaceId && entry.operation !== "list_workspaces") continue;
+      if (!operations || operations.includes(entry.operation)) this.readCache.delete(key);
+    }
   }
 
   private workspaceFor(request: ExplorerRequest, localStatus: ExplorerStatusDto): string {
@@ -549,6 +701,305 @@ export class ExplorerService {
     };
   }
 
+  private async peerNamesFor(
+    api: ExplorerApi,
+    workspaceId: string,
+    peerIds: string[]
+  ): Promise<Map<string, string>> {
+    const wanted = new Set(peerIds.filter(Boolean));
+    const names = new Map<string, string>();
+    if (!wanted.size) return names;
+    const page = await api.listPeers(workspaceId, 1, 100, false);
+    for (const peer of page.items) {
+      if (!wanted.has(peer.id)) continue;
+      const displayName = peerDisplayName(peer.metadata);
+      if (displayName) names.set(peer.id, displayName);
+    }
+    return names;
+  }
+
+  private async conclusionPage(
+    request: ExplorerRequest,
+    api: ExplorerApi,
+    workspaceId: string
+  ): Promise<ExplorerPage<ConclusionDto>> {
+    const options = pageOptions(request, { size: 20, reverse: true });
+    const filters = conclusionFilterValues(request);
+    const apiFilters = conclusionApiFilters(filters);
+    let page: HonchoPage<Conclusion>;
+    if (filters.query) {
+      const items = await api.queryConclusionsGeneric(
+        workspaceId,
+        filters.query,
+        options.size,
+        apiFilters
+      );
+      page = {
+        items,
+        total: items.length,
+        page: 1,
+        size: options.size,
+        pages: items.length ? 1 : 0,
+      };
+    } else {
+      page = await api.listConclusionsGeneric(
+        workspaceId,
+        options.page,
+        options.size,
+        options.reverse,
+        apiFilters
+      );
+    }
+    const names = await this.peerNamesFor(
+      api,
+      workspaceId,
+      page.items.flatMap((item) => [stringValue(item.observer_id), stringValue(item.observed_id)])
+    );
+    return { ...page, items: page.items.map((item) => conclusionDto(item, names)) };
+  }
+
+  private async scanConclusionReport(
+    api: ExplorerApi,
+    workspaceId: string,
+    filters: JsonRecord = {}
+  ): Promise<ConclusionDuplicateReportDto> {
+    const conclusions: Conclusion[] = [];
+    let pageNumber = 1;
+    let pages = 1;
+    let total = 0;
+    while (pageNumber <= pages && conclusions.length < MAX_CONCLUSION_SCAN_ITEMS) {
+      const page = await api.listConclusionsGeneric(workspaceId, pageNumber, 100, false, filters);
+      total = page.total;
+      pages = Math.max(page.pages, 1);
+      conclusions.push(...page.items.slice(0, MAX_CONCLUSION_SCAN_ITEMS - conclusions.length));
+      if (!page.items.length) break;
+      pageNumber += 1;
+    }
+    const groups = buildConclusionDuplicateGroups(conclusions);
+    const names = await this.peerNamesFor(
+      api,
+      workspaceId,
+      groups.flatMap((group) => [group.observer_id, group.observed_id])
+    );
+    const enriched: ConclusionDuplicateGroupDto[] = groups.map((group) => ({
+      ...group,
+      observer_display_name: names.get(group.observer_id) || undefined,
+      observed_display_name: names.get(group.observed_id) || undefined,
+    }));
+    return {
+      workspace_id: workspaceId,
+      scanned_count: conclusions.length,
+      duplicate_count: enriched.reduce((sum, group) => sum + group.items.length - 1, 0),
+      groups: enriched,
+      truncated: total > conclusions.length || pageNumber <= pages,
+    };
+  }
+
+  private cleanupConclusionConfirmations(now: number): void {
+    for (const [token, pending] of this.conclusionConfirmations.entries()) {
+      if (pending.expiresAt <= now) this.conclusionConfirmations.delete(token);
+    }
+  }
+
+  private async prepareConclusionCleanup(
+    request: ExplorerRequest,
+    api: ExplorerApi,
+    config: HonchoConfig,
+    localStatus: ExplorerStatusDto
+  ): Promise<ConclusionCleanupPreviewDto> {
+    const workspaceId = this.activeWorkspaceForPeerManagement(request, localStatus);
+    const keepConclusionId = request.params?.keepConclusionId || "";
+    const deleteConclusionIds = [...(request.params?.deleteConclusionIds || [])].sort();
+    const filters = conclusionApiFilters(conclusionFilterValues(request));
+    const report = await this.scanConclusionReport(api, workspaceId, filters);
+    const selectedIds = [keepConclusionId, ...deleteConclusionIds];
+    const group = report.groups.find((candidate) => {
+      const ids = new Set(candidate.items.map((item) => item.id));
+      return selectedIds.length === ids.size && selectedIds.every((id) => ids.has(id));
+    });
+    if (!group) {
+      throw new ExplorerValidationError(
+        "The selected Conclusions are no longer members of the same exact duplicate group.",
+        "CONCLUSION_CONFLICT"
+      );
+    }
+
+    const now = Date.now();
+    this.cleanupConclusionConfirmations(now);
+    while (this.conclusionConfirmations.size >= 64) {
+      const oldest = this.conclusionConfirmations.keys().next().value;
+      if (typeof oldest !== "string") break;
+      this.conclusionConfirmations.delete(oldest);
+    }
+    this.conclusionConfirmationSequence += 1;
+    const token = [
+      "conclusion",
+      now.toString(36),
+      this.conclusionConfirmationSequence.toString(36),
+      Math.floor(Math.random() * 0x100000000).toString(36),
+    ].join("-");
+    const confirmationPhrase = "DELETE " + deleteConclusionIds.length;
+    const expiresAt = now + CONCLUSION_CONFIRMATION_TTL_MS;
+    this.conclusionConfirmations.set(token, {
+      configSignature: configSignature(config),
+      workspaceId,
+      groupKey: group.group_key,
+      filters,
+      keepConclusionId,
+      deleteConclusionIds,
+      confirmationPhrase,
+      expiresAt,
+    });
+    return {
+      workspace_id: workspaceId,
+      group_key: group.group_key,
+      observer_id: group.observer_id,
+      observed_id: group.observed_id,
+      session_id: group.session_id,
+      keep_conclusion_id: keepConclusionId,
+      delete_conclusion_ids: deleteConclusionIds,
+      confirmation_phrase: confirmationPhrase,
+      confirmation_token: token,
+      expires_at: new Date(expiresAt).toISOString(),
+    };
+  }
+
+  private async commitConclusionCleanup(
+    request: ExplorerRequest,
+    api: ExplorerApi,
+    config: HonchoConfig,
+    localStatus: ExplorerStatusDto
+  ): Promise<ConclusionCleanupResultDto> {
+    const workspaceId = this.activeWorkspaceForPeerManagement(request, localStatus);
+    const token = request.params?.confirmationToken || "";
+    const pending = this.conclusionConfirmations.get(token);
+    if (!pending || pending.expiresAt <= Date.now()) {
+      this.conclusionConfirmations.delete(token);
+      throw new ExplorerValidationError(
+        "The Conclusion cleanup confirmation expired or was already used.",
+        "CONFIRMATION_REQUIRED"
+      );
+    }
+    const deleteConclusionIds = [...(request.params?.deleteConclusionIds || [])].sort();
+    if (
+      pending.configSignature !== configSignature(config)
+      || pending.workspaceId !== workspaceId
+      || pending.keepConclusionId !== request.params?.keepConclusionId
+      || JSON.stringify(pending.deleteConclusionIds) !== JSON.stringify(deleteConclusionIds)
+    ) {
+      throw new ExplorerValidationError(
+        "The Conclusion cleanup confirmation does not match this request.",
+        "CONFIRMATION_MISMATCH"
+      );
+    }
+    if (request.params?.confirmationText !== pending.confirmationPhrase) {
+      throw new ExplorerValidationError(
+        "The typed confirmation text does not match the cleanup preview.",
+        "CONFIRMATION_TEXT_MISMATCH"
+      );
+    }
+    this.conclusionConfirmations.delete(token);
+
+    const report = await this.scanConclusionReport(api, workspaceId, pending.filters);
+    const group = report.groups.find((candidate) => candidate.group_key === pending.groupKey);
+    const currentIds = new Set(group?.items.map((item) => item.id) || []);
+    if (!group || ![pending.keepConclusionId, ...pending.deleteConclusionIds].every((id) => currentIds.has(id))) {
+      throw new ExplorerValidationError(
+        "The duplicate group changed after confirmation. Scan and prepare cleanup again.",
+        "CONCLUSION_CONFLICT"
+      );
+    }
+
+    const deletedIds: string[] = [];
+    const failures: ConclusionCleanupResultDto["failures"] = [];
+    for (const id of pending.deleteConclusionIds) {
+      try {
+        await api.deleteConclusionFor(workspaceId, id);
+        deletedIds.push(id);
+      } catch (error) {
+        const mapped = errorFrom(error);
+        failures.push({ id, error: (mapped.code + ": " + mapped.message).slice(0, 500) });
+      }
+    }
+    if (deletedIds.length) this.invalidateReadCache(workspaceId, ["list_conclusions"]);
+    return {
+      workspace_id: workspaceId,
+      keep_conclusion_id: pending.keepConclusionId,
+      deleted_ids: deletedIds,
+      failures,
+    };
+  }
+
+  private requireSidecarMaintenance(): SidecarMaintenance {
+    if (!this.sidecarMaintenance) {
+      throw new ExplorerValidationError("Prompt sidecar maintenance is unavailable.", "SIDECAR_UNAVAILABLE");
+    }
+    return this.sidecarMaintenance;
+  }
+
+  private async prepareSidecarClear(): Promise<PromptSidecarClearPreviewDto> {
+    const maintenance = this.requireSidecarMaintenance();
+    const status = await maintenance.status();
+    const now = Date.now();
+    for (const [token, pending] of this.sidecarConfirmations.entries()) {
+      if (pending.expiresAt <= now) this.sidecarConfirmations.delete(token);
+    }
+    while (this.sidecarConfirmations.size >= 64) {
+      const oldest = this.sidecarConfirmations.keys().next().value;
+      if (typeof oldest !== "string") break;
+      this.sidecarConfirmations.delete(oldest);
+    }
+    this.sidecarConfirmationSequence += 1;
+    const token = [
+      "sidecar",
+      now.toString(36),
+      this.sidecarConfirmationSequence.toString(36),
+      Math.floor(Math.random() * 0x100000000).toString(36),
+    ].join("-");
+    const confirmationPhrase = "CLEAR SIDECARS";
+    const expiresAt = now + SIDECAR_CONFIRMATION_TTL_MS;
+    this.sidecarConfirmations.set(token, {
+      fileCount: status.file_count,
+      totalBytes: status.total_bytes,
+      confirmationPhrase,
+      expiresAt,
+    });
+    return {
+      ...status,
+      confirmation_phrase: confirmationPhrase,
+      confirmation_token: token,
+      expires_at: new Date(expiresAt).toISOString(),
+    };
+  }
+
+  private async commitSidecarClear(request: ExplorerRequest): Promise<PromptSidecarClearResultDto> {
+    const token = request.params?.confirmationToken || "";
+    const pending = this.sidecarConfirmations.get(token);
+    if (!pending || pending.expiresAt <= Date.now()) {
+      this.sidecarConfirmations.delete(token);
+      throw new ExplorerValidationError(
+        "The prompt sidecar confirmation expired or was already used.",
+        "CONFIRMATION_REQUIRED"
+      );
+    }
+    if (request.params?.confirmationText !== pending.confirmationPhrase) {
+      throw new ExplorerValidationError(
+        "The typed confirmation text does not match the sidecar preview.",
+        "CONFIRMATION_TEXT_MISMATCH"
+      );
+    }
+    this.sidecarConfirmations.delete(token);
+    const maintenance = this.requireSidecarMaintenance();
+    const current = await maintenance.status();
+    if (current.file_count !== pending.fileCount || current.total_bytes !== pending.totalBytes) {
+      throw new ExplorerValidationError(
+        "Prompt sidecar storage changed after confirmation. Prepare the clear operation again.",
+        "SIDECAR_CONFLICT"
+      );
+    }
+    return maintenance.clear();
+  }
+
   private async prepareIdentityUpdate(
     request: ExplorerRequest,
     api: ExplorerApi,
@@ -666,6 +1117,11 @@ export class ExplorerService {
     const api = this.currentApi(config);
 
     if (request.op === "status") return localStatus;
+    if (request.op === "sidecar_status") {
+      return this.requireSidecarMaintenance().status();
+    }
+    if (request.op === "prepare_sidecar_clear") return this.prepareSidecarClear();
+    if (request.op === "commit_sidecar_clear") return this.commitSidecarClear(request);
 
     this.requireConfigured(config);
     if (request.op === "identity_status") {
@@ -675,13 +1131,23 @@ export class ExplorerService {
       return this.prepareIdentityUpdate(request, api, config, localStatus);
     }
     if (request.op === "commit_identity_update") {
-      return this.commitIdentityUpdate(request, api, config, localStatus);
+      const result = await this.commitIdentityUpdate(request, api, config, localStatus);
+      this.invalidateReadCache(result.workspace_id);
+      return result;
     }
     if (request.op === "prepare_peer_mutation") {
       return this.preparePeerMutation(request, api, config, localStatus);
     }
     if (request.op === "commit_peer_mutation") {
-      return this.commitPeerMutation(request, api, config, localStatus);
+      const result = await this.commitPeerMutation(request, api, config, localStatus);
+      this.invalidateReadCache(this.workspaceFor(request, localStatus));
+      return result;
+    }
+    if (request.op === "prepare_conclusion_cleanup") {
+      return this.prepareConclusionCleanup(request, api, config, localStatus);
+    }
+    if (request.op === "commit_conclusion_cleanup") {
+      return this.commitConclusionCleanup(request, api, config, localStatus);
     }
     const workspaceId = this.workspaceFor(request, localStatus);
     if (!workspaceId) throw new ExplorerValidationError("workspaceId is required.");
@@ -692,89 +1158,107 @@ export class ExplorerService {
 
     if (request.op === "list_workspaces") {
       const options = pageOptions(request, { size: 20, reverse: false });
-      return api.listWorkspaces(options.page, options.size, options.reverse) as Promise<
-        ExplorerPage<WorkspaceDto>
-      >;
+      return this.cachedRead(config, request, "*", () =>
+        api.listWorkspaces(options.page, options.size, options.reverse) as Promise<ExplorerPage<WorkspaceDto>>
+      );
     }
     if (request.op === "list_peers") {
       const options = pageOptions(request, { size: 20, reverse: true });
       const active = workspaceId === localStatus.workspace;
-      return peerPageDto(
+      return this.cachedRead(config, request, workspaceId, async () => peerPageDto(
         await api.listPeers(workspaceId, options.page, options.size, options.reverse),
         localStatus.workspace,
         active ? localStatus.user_peer : "",
         active ? localStatus.ai_peer : ""
-      );
+      ));
     }
     if (request.op === "get_peer") {
       const active = workspaceId === localStatus.workspace;
-      return peerDto(
+      return this.cachedRead(config, request, workspaceId, async () => peerDto(
         await api.getPeerReadOnly(workspaceId, request.params?.peerId || ""),
         localStatus.workspace,
         active ? localStatus.user_peer : "",
         active ? localStatus.ai_peer : ""
-      );
+      ));
     }
     if (request.op === "list_peer_sessions") {
       const options = pageOptions(request, { size: 20, reverse: true });
-      return api.listPeerSessions(
+      return this.cachedRead(config, request, workspaceId, () => api.listPeerSessions(
         workspaceId,
         request.params?.peerId || "",
         options.page,
         options.size,
         options.reverse
-      ) as Promise<ExplorerPage<SessionDto>>;
+      ) as Promise<ExplorerPage<SessionDto>>);
     }
     if (request.op === "get_peer_card") {
       const observerPeerId = request.params?.observerPeerId || "";
       const targetPeerId = request.params?.targetPeerId || "";
-      await Promise.all([
-        this.requirePeer(api, workspaceId, observerPeerId),
-        this.requirePeer(api, workspaceId, targetPeerId),
-      ]);
-      const result: PeerCardDto = {
-        workspace_id: workspaceId,
-        observer_id: observerPeerId,
-        target_id: targetPeerId,
-        peer_card: await api.getPeerCardReadOnly(workspaceId, observerPeerId, targetPeerId),
-      };
-      return result;
+      return this.cachedRead(config, request, workspaceId, async () => {
+        await Promise.all([
+          this.requirePeer(api, workspaceId, observerPeerId),
+          this.requirePeer(api, workspaceId, targetPeerId),
+        ]);
+        const result: PeerCardDto = {
+          workspace_id: workspaceId,
+          observer_id: observerPeerId,
+          target_id: targetPeerId,
+          peer_card: await api.getPeerCardReadOnly(workspaceId, observerPeerId, targetPeerId),
+        };
+        return result;
+      });
     }
     if (request.op === "list_sessions") {
       const options = pageOptions(request, { size: 20, reverse: true });
-      return api.listSessions(workspaceId, options.page, options.size, options.reverse) as Promise<
-        ExplorerPage<SessionDto>
-      >;
+      return this.cachedRead(config, request, workspaceId, () =>
+        api.listSessions(workspaceId, options.page, options.size, options.reverse) as Promise<ExplorerPage<SessionDto>>
+      );
     }
     if (request.op === "list_messages") {
       const options = pageOptions(request, { size: 30, reverse: false });
-      return api.listMessages(
+      return this.cachedRead(config, request, workspaceId, () => api.listMessages(
         workspaceId,
         request.params?.sessionId || "",
         options.page,
         options.size,
         options.reverse
-      ) as Promise<ExplorerPage<MessageDto>>;
+      ) as Promise<ExplorerPage<MessageDto>>);
     }
     if (request.op === "list_conclusions") {
-      const options = pageOptions(request, { size: 20, reverse: false });
-      return api.listConclusionsGeneric(
+      return this.cachedRead(config, request, workspaceId, () =>
+        this.conclusionPage(request, api, workspaceId)
+      );
+    }
+    if (request.op === "scan_conclusion_duplicates") {
+      return this.scanConclusionReport(
+        api,
         workspaceId,
-        options.page,
-        options.size,
-        options.reverse
-      ) as Promise<ExplorerPage<ConclusionDto>>;
+        conclusionApiFilters(conclusionFilterValues(request))
+      );
     }
     throw new ExplorerValidationError("Unknown Explorer operation.");
   }
 
   async handle(value: unknown): Promise<ExplorerResponse> {
     const fallbackRequestId = requestIdFrom(value);
+    const startedAt = Date.now();
+    let operation = "invalid_request";
     try {
       const request = parseExplorerRequest(value);
+      operation = request.op;
       const data = await this.execute(request);
+      console.log(
+        "[honcho] explorer op=" + request.op
+        + " duration_ms=" + (Date.now() - startedAt)
+        + " items=" + resultItemCount(data)
+      );
       return { ok: true, requestId: request.requestId, data };
     } catch (error) {
+      console.log(
+        "[honcho] explorer op=" + operation
+        + " duration_ms=" + (Date.now() - startedAt)
+        + " status=failed"
+      );
       return { ok: false, requestId: fallbackRequestId, error: errorFrom(error) };
     }
   }

@@ -293,7 +293,7 @@ HONCHO_WORKSPACE=test
 - HTTP 非 2xx、无效 JSON 和网络错误统一抛出明确错误。
 - 自动 Hook 捕获错误并 fail-open；显式工具返回结构化错误。
 - 未发送队列只存在于 ToolPkg main 进程，强制杀进程后不会恢复；已确认写入的来源 key 可从 Honcho metadata 恢复。
-- Prompt sidecar 位于 ToolPkg 私有配置目录，按 Chat 分片，使用 TTL/LRU 条数限制并对损坏文件隔离；总字节上限和清理入口仍待实现。
+- Prompt sidecar 位于 ToolPkg 私有配置目录，按 Chat 分片，使用 90 天 TTL、每 Chat 记录上限、1 MiB 单文件上限和 8 MiB 全局 LRU 回收；损坏文件会隔离，Overview 提供带动态状态校验和文字确认的清理入口。
 - 成功写入后的长期数据由 Honcho 保存，不依赖本地文件。
 - 配置切换会重建客户端；已经排队的消息保留其入队时的 API 客户端，避免被错误写入新 Workspace。
 - UI、main 和 sandbox 是不同 JS 上下文。未来 UI 不得依赖模块顶层变量共享状态，必须通过 `ToolPkg.ipc` 与 main 通信。
@@ -321,7 +321,9 @@ build/operit-honcho-0.1.0.toolpkg
 - REST 初始化、分块、Context 映射和 Search 过滤。
 - Controller 注入、角色解析、去重和失败重试。
 - Message allowlist、稳定来源 metadata、跨重载 reconcile 和 Conclusion 精确幂等。
-- Prompt sidecar 重载恢复、损坏隔离和写入失败 fail-open。
+- Prompt sidecar 重载恢复、同轮并发合并、损坏隔离、写入失败 fail-open、单文件/总字节上限、LRU 回收和清空。
+- Conclusion 服务端筛选、语义查询、动态方向显示、精确重复扫描、单次确认删除和部分失败。
+- Explorer 30 秒读取缓存、并发请求合并、强制刷新和写后失效。
 - Peer REST 映射、详情/Card 方向、归档保护、Session 移除、确认令牌复用和并发冲突。
 - Peer 详情 UI、Card 空状态/方向、角色与 Session 确认面板。
 - 子包工具结构化错误。
@@ -329,4 +331,4 @@ build/operit-honcho-0.1.0.toolpkg
 
 ## 10. 当前边界
 
-Phase 1 的只读基础链路和阶段 C 的参与者管理切片已实现：同一 ToolPkg 现在包含 Explorer DTO、分页 API、受控 IPC、主侧边栏入口、Workspace/Peer/Session/Message/Conclusion 浏览，以及受保护的 Peer 创建、显示名、归档、角色改绑、Session 移除和 Card 方向预览。真实 `test` Workspace 写操作、重启持久化与多尺寸截图验收仍待在已配置 API Key 的 Operit 环境完成；详情见 [EXPLORE_UI_PLAN.md](./EXPLORE_UI_PLAN.md)。
+阶段 D/E 的代码与自动回归已经完成：Explorer 支持 Conclusion 方向显示、服务端筛选/语义查询、精确重复报告与受控清理，并具备 30 秒读缓存、并发请求合并、强制刷新、HTTP/IPC 耗时日志和 Prompt sidecar 容量/清理管理。真实 `test` Workspace 的筛选与删除闭环、真机多尺寸视觉检查、缓存 P50/P95、重载前缀与 cachedInputTokens 实测仍待完成，因此阶段 D/E 尚未标记为真机验收完成；详情见 [EXPLORE_UI_PLAN.md](./EXPLORE_UI_PLAN.md) 和 [EXPLORER_REMEDIATION_PLAN.md](./EXPLORER_REMEDIATION_PLAN.md)。

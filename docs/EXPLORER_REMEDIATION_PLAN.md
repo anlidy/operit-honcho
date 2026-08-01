@@ -478,22 +478,22 @@ request(N+1) 历史中 User(N) 的序列化 API 内容
 
 ## 11. 实施顺序
 
-### 当前进度快照（2026-08-01 19:37，Asia/Shanghai）
+### 当前进度快照（2026-08-01 21:28，Asia/Shanghai）
 
 | 阶段 | 状态 | 已完成 | 下一验收点 |
 | --- | --- | --- | --- |
 | A：阻止新增重复数据 | **主人已确认消息恢复正常，P0 真机主路径通过** | 稳定 `source_key`、Message metadata、最近 100 条 reconcile、未知写入结果保护、结构化移除 thinking/tool/result/status 块、Conclusion 精确幂等、Session-shaped Peer 防误用 | 后续补充重载重放、失败工具与真实变体 fixture，持续观察边界样本 |
 | B：统一 Peer 身份 | **运行时与受控迁移 UI 已实现并完成自动回归** | Workspace `operit_honcho` identity schema；metadata 优先、旧 env 仅迁移回退；15 秒 revision 刷新；main/sandbox 共用 API 解析；custom Peer 只读存在性校验；工具返回 resolved Peer；Explorer identity 状态；活跃 Workspace 迁移/改绑预览；revision 绑定的五分钟单次确认令牌 | 真机确认 main/sandbox/Explorer 一致、迁移确认交互和 Workspace metadata 持久化 |
 | C：参与者管理与 Card | **实现完成并通过自动回归，待真机与真实 API 验收** | Peer 详情；显示名/原始 ID/角色/归档状态；创建、改名、归档/恢复、角色改绑；分页 Peer Session 与成员移除；observer/target Card 预览；活跃 Workspace 写保护；五分钟单次确认；metadata/成员关系并发检查 | 在真实 `test` Workspace 完成创建、改名、角色改绑、归档/恢复、Session 移除、Card 切换和重启持久化验收；检查竖屏/横屏/宽屏布局 |
-| D：Conclusion 方向、筛选与清理 | **未开始，只有创建幂等基础** | 显式创建 Conclusion 已按 observer、observed、Session 和规范化内容查重 | 动态方向显示、服务端筛选、重复报告和确认清理 |
-| E：时间与性能 | **部分实现并完成自动回归** | Prompt sidecar、History/Estimate History/Finalize Hook、重载恢复、TTL/LRU 条数限制、损坏隔离和 fail-open；`Asia/Shanghai` formatter 与 UTC+8 fallback；本地 `status`/远端 `queue_status` 解耦；queue 15 秒缓存和并发合并；非 Overview 列表不再请求 queue | 真机核对上海时间和列表切换延迟；继续实现列表 SWR 缓存、sidecar 总字节上限和清理入口、Provider 重试与 `cachedInputTokens` 验证 |
+| D：Conclusion 方向、筛选与清理 | **代码与自动回归完成，待真实 Workspace 与真机验收** | 服务端 observer/observed/Session/level 筛选与语义查询；Peer 显示名和动态方向；最多 5,000 条精确重复扫描；筛选范围绑定、五分钟单次令牌、文字确认、提交前重扫、并发变化检测和部分失败报告 | 在明确的 `test` Workspace 验证筛选、语义查询、重复预览、选择性删除和部分失败恢复；检查多尺寸交互布局 |
+| E：时间与性能 | **代码与自动回归完成，待真机性能和前缀缓存实测** | `Asia/Shanghai` formatter；queue 解耦与 15 秒缓存；Explorer 30 秒读缓存、同 key 请求合并、强制刷新、写后失效和过期响应丢弃；Prompt sidecar 同轮注入合并、1 MiB 单文件/8 MiB 全局容量、TTL/LRU 回收、状态与确认清理入口 | 真机核对上海时间；测量缓存/无缓存 P50/P95；验证重载前缀逐字稳定和 `cachedInputTokens` 改善 |
 
 当前自动化基线：
 
-- `npm test`：41 项全部通过。
-- `npm run pack`：通过，包结构与工具 METADATA 校验通过。
+- `npm test`：51 项全部通过。
+- `npm run pack`：通过，重新执行 51 项测试并生成 `build/operit-honcho-0.1.0.toolpkg`；包结构与 METADATA 已复核。
 - `git diff --check`：通过；Honcho Key 模式扫描无命中。
-- 文档计划基线已提交为 `4578c30`；本轮实现和进度同步尚未提交，待真机验收后单独形成实现提交。
+- 阶段 C 已提交为 `1984787 feat: harden Honcho memory and peer management`；阶段 D/E 实现和进度同步作为后续独立提交交付。
 - `skipped_thinking` 和 `skipped_tool` 已覆盖纯内部块；`skipped_variant` 仍需真实变体 Hook fixture。
 - 15:47 真机回归：已安装旧构建仍把流式增长快照、`<think>`、动态 `<tool_SUFFIX>`、`<tool_result_SUFFIX>` 和 `<status>` 上传到 Honcho。源码确认 Operit 将递归工具循环合并进同一 AI 内容流；最新修复只接受 `completedAt > 0` 的最终消息，并在计算来源键和 POST 前按宿主标记结构移除内部块。
 - 16:04 已通过 `debug_install_toolpkg` 安装包含阶段 A P0 修复的构建；安装返回确认 `com.operit.honcho` 与 `honcho` 均为禁用，小幺未执行启用操作。16:16 再次读取设备状态时两者均已启用，视为主人已开始真机测试，不回改该状态。

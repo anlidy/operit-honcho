@@ -315,8 +315,10 @@ test("explicit conclusions are exact-idempotent within observer, observed, and s
 class MemorySidecarStorage {
   constructor() {
     this.files = new Map();
+    this.modified = new Map();
     this.quarantined = [];
     this.failWrites = false;
+    this.clock = 0;
   }
 
   async read(path) {
@@ -326,11 +328,35 @@ class MemorySidecarStorage {
   async writeAtomic(path, content) {
     if (this.failWrites) throw new Error("disk full");
     this.files.set(path, content);
+    this.clock += 1;
+    this.modified.set(path, this.clock);
   }
 
   async quarantine(path) {
     this.quarantined.push(path);
     this.files.delete(path);
+    this.modified.delete(path);
+  }
+
+  async list(root) {
+    return Array.from(this.files.entries())
+      .filter(([path]) => path.startsWith(root + "/"))
+      .map(([path, content]) => ({
+        path,
+        size: Buffer.byteLength(content, "utf8"),
+        lastModified: this.modified.get(path) || 0,
+      }));
+  }
+
+  async remove(path) {
+    this.files.delete(path);
+    this.modified.delete(path);
+  }
+
+  async clear(root) {
+    for (const path of Array.from(this.files.keys())) {
+      if (path.startsWith(root + "/")) await this.remove(path);
+    }
   }
 }
 
@@ -377,4 +403,69 @@ test("prompt sidecars fail open on corrupt files and do not inject when persiste
     injectMemoryContext(clean, "must persist first")
   );
   assert.equal(result, null);
+});
+
+test("prompt sidecars merge concurrent retries for the same turn", async () => {
+  const storage = new MemorySidecarStorage();
+  const store = new PromptSidecarStore(storage, "/sidecars", () => 1000);
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  let fetches = 0;
+  const inject = async (clean) => {
+    fetches += 1;
+    await gate;
+    return injectMemoryContext(clean, "shared memory");
+  };
+
+  const first = store.injectCurrent("chat", [], "hello", inject);
+  await Promise.resolve();
+  const second = store.injectCurrent("chat", [], "hello", inject);
+  release();
+  const [firstResult, secondResult] = await Promise.all([first, second]);
+
+  assert.equal(fetches, 1);
+  assert.equal(firstResult, secondResult);
+  assert.match(firstResult, /shared memory/);
+});
+
+test("prompt sidecars enforce byte limits, evict old files, and clear private storage", async () => {
+  const storage = new MemorySidecarStorage();
+  let now = 1000;
+  const store = new PromptSidecarStore(storage, "/sidecars", () => now, {
+    maxTotalBytes: 800,
+    maxFileBytes: 700,
+  });
+  const memory = "x".repeat(80);
+  assert.ok(await store.injectCurrent("old-chat", [], "old", async (clean) =>
+    injectMemoryContext(clean, memory)
+  ));
+  now = 2000;
+  assert.ok(await store.injectCurrent("new-chat", [], "new", async (clean) =>
+    injectMemoryContext(clean, memory)
+  ));
+
+  const oldPath = "/sidecars/" + sha256("old-chat").slice(0, 32) + ".json";
+  const newPath = "/sidecars/" + sha256("new-chat").slice(0, 32) + ".json";
+  const statistics = await store.statistics();
+  assert.equal(storage.files.has(oldPath), false);
+  assert.equal(storage.files.has(newPath), true);
+  assert.equal(statistics.fileCount, 1);
+  assert.ok(statistics.totalBytes <= 800);
+
+  const cleared = await store.clearAll();
+  assert.equal(cleared.fileCount, 1);
+  assert.equal((await store.statistics()).fileCount, 0);
+});
+
+test("prompt sidecars refuse an injection that cannot fit the per-file limit", async () => {
+  const storage = new MemorySidecarStorage();
+  const store = new PromptSidecarStore(storage, "/sidecars", () => 1000, {
+    maxTotalBytes: 1024,
+    maxFileBytes: 180,
+  });
+  const result = await store.injectCurrent("chat", [], "hello", async (clean) =>
+    injectMemoryContext(clean, "x".repeat(500))
+  );
+  assert.equal(result, null);
+  assert.equal(storage.files.size, 0);
 });

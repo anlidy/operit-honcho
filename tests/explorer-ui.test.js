@@ -5,6 +5,7 @@ const fs = require("node:fs");
 const { clipText, compactJson, displayTime, pageLabel } = require("../dist/ui/honcho_explore/format");
 const { renderIdentityManager } = require("../dist/ui/honcho_explore/identity.ui");
 const { renderPeerWorkspace } = require("../dist/ui/honcho_explore/peers.ui");
+const { renderConclusionWorkspace } = require("../dist/ui/honcho_explore/conclusions.ui");
 const screen = require("../dist/ui/honcho_explore/index.ui").default;
 
 test("Explorer compiled UI uses QuickJS-resolvable module specifiers", () => {
@@ -14,6 +15,7 @@ test("Explorer compiled UI uses QuickJS-resolvable module specifiers", () => {
   );
   assert.match(source, /require\("\.\/identity\.ui\.js"\)/);
   assert.match(source, /require\("\.\/peers\.ui\.js"\)/);
+  assert.match(source, /require\("\.\/conclusions\.ui\.js"\)/);
   const peerSource = fs.readFileSync(
     require.resolve("../dist/ui/honcho_explore/peers.ui"),
     "utf8"
@@ -264,4 +266,156 @@ test("Explorer Peer detail renders directional Card, roles, Sessions, and confir
   assert.match(serialized, /确认移除会话成员/);
   assert.match(serialized, /不删除历史数据/);
   assert.match(serialized, /person_remove/);
+});
+
+test("Explorer Conclusion workspace renders filters, resolved direction, and cleanup confirmation", () => {
+  const UI = new Proxy({}, {
+    get: (_target, type) => (props = {}, children) => ({
+      type: String(type),
+      props,
+      children: Array.isArray(children) ? children.filter(Boolean) : children ? [children] : [],
+    }),
+  });
+  const ctx = {
+    UI,
+    MaterialTheme: {
+      colorScheme: new Proxy({}, { get: (_target, key) => String(key) }),
+    },
+  };
+  const noop = () => {};
+  const group = {
+    group_key: "duplicate-key",
+    content: "Duplicate fact",
+    observer_id: "assistant",
+    observer_display_name: "Assistant",
+    observed_id: "owner",
+    observed_display_name: "Owner",
+    session_id: "session-1",
+    items: [
+      { id: "conclusion-1", created_at: "2026-08-01T01:00:00Z" },
+      { id: "conclusion-2", created_at: "2026-08-01T02:00:00Z" },
+      { id: "conclusion-3", created_at: "2026-08-01T03:00:00Z" },
+    ],
+    earliest_id: "conclusion-1",
+    latest_id: "conclusion-3",
+  };
+  const nodes = renderConclusionWorkspace(ctx, {
+    workspaceId: "test",
+    activeWorkspace: "test",
+    page: {
+      items: [{
+        id: "conclusion-1",
+        content: "Duplicate fact",
+        observer_id: "assistant",
+        observer_display_name: "Assistant",
+        observed_id: "owner",
+        observed_display_name: "Owner",
+        session_id: "session-1",
+        level: "explicit",
+        created_at: "2026-08-01T01:00:00Z",
+      }],
+      total: 3,
+      page: 1,
+      size: 20,
+      pages: 1,
+    },
+    peers: [
+      { id: "assistant", display_name: "Assistant", archived: false, roles: ["ai"] },
+      { id: "owner", display_name: "Owner", archived: false, roles: ["user"] },
+    ],
+    userPeerId: "owner",
+    aiPeerId: "assistant",
+    draftFilters: {},
+    appliedFilters: {},
+    observerMenuOpen: false,
+    observedMenuOpen: false,
+    levelMenuOpen: false,
+    duplicateReport: {
+      workspace_id: "test",
+      scanned_count: 3,
+      duplicate_count: 2,
+      groups: [group],
+      truncated: false,
+    },
+    selectedDuplicateGroupKey: "duplicate-key",
+    keepConclusionId: "conclusion-1",
+    cleanupPreview: {
+      workspace_id: "test",
+      group_key: "duplicate-key",
+      observer_id: "assistant",
+      observed_id: "owner",
+      session_id: "session-1",
+      keep_conclusion_id: "conclusion-1",
+      delete_conclusion_ids: ["conclusion-2", "conclusion-3"],
+      confirmation_phrase: "DELETE 2",
+      confirmation_token: "conclusion-token",
+      expires_at: "2026-08-01T18:00:00Z",
+    },
+    confirmationText: "",
+    busy: false,
+    notice: "",
+    error: "",
+    onDraftFiltersChange: noop,
+    onObserverMenuChange: noop,
+    onObservedMenuChange: noop,
+    onLevelMenuChange: noop,
+    onApplyFilters: noop,
+    onClearFilters: noop,
+    onPage: noop,
+    onScanDuplicates: noop,
+    onSelectDuplicateGroup: noop,
+    onKeepConclusionChange: noop,
+    onPrepareCleanup: noop,
+    onCommitCleanup: noop,
+    onCancelCleanup: noop,
+    onConfirmationTextChange: noop,
+  });
+  const serialized = JSON.stringify(nodes, (key, value) => typeof value === "function" ? "[function]" : value);
+  assert.match(serialized, /语义搜索/);
+  assert.match(serialized, /AI → 用户/);
+  assert.match(serialized, /Assistant → Owner/);
+  assert.match(serialized, /assistant → owner/);
+  assert.match(serialized, /确认删除重复结论/);
+  assert.match(serialized, /DELETE 2/);
+});
+
+test("Explorer Overview renders sidecar capacity and typed clear preview without Honcho configuration", () => {
+  const UI = new Proxy({}, {
+    get: (_target, type) => (props = {}, children) => ({
+      type: String(type),
+      props,
+      children: Array.isArray(children) ? children.filter(Boolean) : children ? [children] : [],
+    }),
+  });
+  const state = {
+    status: { configured: false, workspace: "test" },
+    sidecarStatus: { file_count: 2, total_bytes: 2048, max_bytes: 8388608 },
+    sidecarClearPreview: {
+      file_count: 2,
+      total_bytes: 2048,
+      max_bytes: 8388608,
+      confirmation_phrase: "CLEAR SIDECARS",
+      confirmation_token: "sidecar-token",
+      expires_at: "2026-08-01T18:00:00Z",
+    },
+    hasLoaded: true,
+  };
+  const refs = new Map();
+  const ctx = {
+    UI,
+    MaterialTheme: {
+      colorScheme: new Proxy({}, { get: (_target, key) => String(key) }),
+    },
+    useState: (key, initial) => [Object.hasOwn(state, key) ? state[key] : initial, () => {}],
+    useRef: (key, initial) => {
+      if (!refs.has(key)) refs.set(key, { current: initial });
+      return refs.get(key);
+    },
+  };
+  const root = screen(ctx);
+  const serialized = JSON.stringify(root, (key, value) => typeof value === "function" ? "[function]" : value);
+  assert.match(serialized, /Prompt sidecar/);
+  assert.match(serialized, /2 个文件 · 2.0 KB/);
+  assert.match(serialized, /容量上限 8.0 MB/);
+  assert.match(serialized, /CLEAR SIDECARS/);
 });

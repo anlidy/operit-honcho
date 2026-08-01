@@ -5,11 +5,35 @@ const SCHEMA_VERSION = 1;
 const MAX_RECORDS_PER_CHAT = 256;
 const RECORD_TTL_MS = 90 * 24 * 60 * 60 * 1000;
 const TOUCH_WRITE_INTERVAL_MS = 60 * 60 * 1000;
+export const PROMPT_SIDECAR_MAX_TOTAL_BYTES = 8 * 1024 * 1024;
+const PROMPT_SIDECAR_MAX_FILE_BYTES = 1024 * 1024;
+
+export interface SidecarStorageEntry {
+  path: string;
+  size: number;
+  lastModified: number;
+}
+
+export interface PromptSidecarStatistics {
+  fileCount: number;
+  totalBytes: number;
+  maxBytes: number;
+}
+
+export interface PromptSidecarLimits {
+  maxRecordsPerChat: number;
+  recordTtlMs: number;
+  maxTotalBytes: number;
+  maxFileBytes: number;
+}
 
 export interface SidecarStorage {
   read(path: string): Promise<string | null>;
   writeAtomic(path: string, content: string): Promise<void>;
   quarantine(path: string): Promise<void>;
+  list?(root: string): Promise<SidecarStorageEntry[]>;
+  remove?(path: string): Promise<void>;
+  clear?(root: string): Promise<void>;
 }
 
 interface SidecarRecord {
@@ -68,16 +92,44 @@ function parseFile(value: string, chatId: string): SidecarFile {
   return parsed as SidecarFile;
 }
 
+function utf8ByteLength(value: string): number {
+  let bytes = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code < 0x80) bytes += 1;
+    else if (code < 0x800) bytes += 2;
+    else if (code >= 0xd800 && code <= 0xdbff && index + 1 < value.length) {
+      const next = value.charCodeAt(index + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        bytes += 4;
+        index += 1;
+      } else bytes += 3;
+    } else bytes += 3;
+  }
+  return bytes;
+}
+
 export class PromptSidecarStore {
   private readonly cache = new Map<string, SidecarFile>();
   private readonly loads = new Map<string, Promise<SidecarFile>>();
   private readonly writes = new Map<string, Promise<void>>();
+  private readonly injections = new Map<string, Promise<string | null>>();
+  private limitEnforcement: Promise<void> = Promise.resolve();
+  private readonly limits: PromptSidecarLimits;
 
   constructor(
     private readonly storage: SidecarStorage,
     private readonly root: string,
-    private readonly now: () => number = () => Date.now()
-  ) {}
+    private readonly now: () => number = () => Date.now(),
+    limits: Partial<PromptSidecarLimits> = {}
+  ) {
+    this.limits = {
+      maxRecordsPerChat: limits.maxRecordsPerChat || MAX_RECORDS_PER_CHAT,
+      recordTtlMs: limits.recordTtlMs || RECORD_TTL_MS,
+      maxTotalBytes: limits.maxTotalBytes || PROMPT_SIDECAR_MAX_TOTAL_BYTES,
+      maxFileBytes: limits.maxFileBytes || PROMPT_SIDECAR_MAX_FILE_BYTES,
+    };
+  }
 
   private path(chatId: string): string {
     return `${this.root}/${sha256(chatId).slice(0, 32)}.json`;
@@ -111,27 +163,143 @@ export class PromptSidecarStore {
     }
   }
 
-  private prune(file: SidecarFile): void {
+  private prune(file: SidecarFile, requiredRecordKey?: string): void {
     const now = this.now();
-    const records = Object.entries(file.records)
-      .filter(([, record]) => now - Number(record.last_seen_at || record.created_at || 0) <= RECORD_TTL_MS)
+    const source = file.records;
+    const records = Object.entries(source)
+      .filter(([, record]) => now - Number(record.last_seen_at || record.created_at || 0) <= this.limits.recordTtlMs)
       .sort((left, right) => Number(right[1].last_seen_at) - Number(left[1].last_seen_at))
-      .slice(0, MAX_RECORDS_PER_CHAT);
+      .slice(0, this.limits.maxRecordsPerChat);
+    if (requiredRecordKey && source[requiredRecordKey]
+      && !records.some(([key]) => key === requiredRecordKey)) {
+      if (records.length >= this.limits.maxRecordsPerChat) records.pop();
+      records.unshift([requiredRecordKey, source[requiredRecordKey]]);
+    }
     file.records = Object.fromEntries(records);
   }
 
-  private async persist(chatId: string, file: SidecarFile): Promise<void> {
-    this.prune(file);
+  private serialize(file: SidecarFile, requiredRecordKey?: string): string {
+    const candidate: SidecarFile = { ...file, records: { ...file.records } };
+    this.prune(candidate, requiredRecordKey);
+    let content = JSON.stringify(candidate);
+    if (utf8ByteLength(content) <= this.limits.maxFileBytes) {
+      file.records = candidate.records;
+      return content;
+    }
+
+    const records = Object.entries(candidate.records)
+      .sort((left, right) => Number(right[1].last_seen_at) - Number(left[1].last_seen_at));
+    while (records.length > 1 && utf8ByteLength(content) > this.limits.maxFileBytes) {
+      let removalIndex = records.length - 1;
+      while (removalIndex >= 0 && records[removalIndex][0] === requiredRecordKey) {
+        removalIndex -= 1;
+      }
+      if (removalIndex < 0) break;
+      records.splice(removalIndex, 1);
+      candidate.records = Object.fromEntries(records);
+      content = JSON.stringify(candidate);
+    }
+    if (utf8ByteLength(content) > this.limits.maxFileBytes) {
+      throw new Error("Prompt sidecar file exceeds the " + this.limits.maxFileBytes + " byte limit.");
+    }
+    if (requiredRecordKey && !candidate.records[requiredRecordKey]) {
+      throw new Error("Prompt sidecar record could not be retained within the file limit.");
+    }
+    file.records = candidate.records;
+    return content;
+  }
+
+  private forgetPath(path: string): void {
+    for (const chatId of this.cache.keys()) {
+      if (this.path(chatId) === path) this.cache.delete(chatId);
+    }
+  }
+
+  private async enforceTotalLimit(activePath: string): Promise<void> {
+    if (!this.storage.list || !this.storage.remove) return;
+    const entries = await this.storage.list(this.root);
+    let total = entries.reduce((sum, entry) => sum + Math.max(0, entry.size), 0);
+    if (total <= this.limits.maxTotalBytes) return;
+
+    const activePaths = new Set(Array.from(this.writes.keys()).map((chatId) => this.path(chatId)));
+    const candidates = entries
+      .filter((entry) => entry.path !== activePath && !activePaths.has(entry.path))
+      .sort((left, right) => {
+        const leftCorrupt = left.path.includes(".corrupt-") ? 0 : 1;
+        const rightCorrupt = right.path.includes(".corrupt-") ? 0 : 1;
+        return leftCorrupt - rightCorrupt || left.lastModified - right.lastModified;
+      });
+    for (const entry of candidates) {
+      if (total <= this.limits.maxTotalBytes) break;
+      await this.storage.remove(entry.path);
+      this.forgetPath(entry.path);
+      total -= Math.max(0, entry.size);
+    }
+    if (total > this.limits.maxTotalBytes) {
+      if (Array.from(activePaths).some((path) => path !== activePath)) return;
+      await this.storage.remove(activePath);
+      this.forgetPath(activePath);
+      throw new Error(
+        `Prompt sidecar exceeds the ${this.limits.maxTotalBytes} byte storage limit.`
+      );
+    }
+  }
+
+  private async persist(chatId: string, file: SidecarFile, requiredRecordKey?: string): Promise<void> {
     const path = this.path(chatId);
-    const content = JSON.stringify(file);
     const previous = this.writes.get(chatId) || Promise.resolve();
-    const current = previous.catch(() => undefined).then(() => this.storage.writeAtomic(path, content));
+    const current = previous.catch(() => undefined).then(() => {
+      const content = this.serialize(file, requiredRecordKey);
+      return this.storage.writeAtomic(path, content);
+    });
     this.writes.set(chatId, current);
     try {
       await current;
+      const enforcement = this.limitEnforcement
+        .catch(() => undefined)
+        .then(() => this.enforceTotalLimit(path));
+      this.limitEnforcement = enforcement;
+      await enforcement;
     } finally {
       if (this.writes.get(chatId) === current) this.writes.delete(chatId);
     }
+  }
+
+  async statistics(): Promise<PromptSidecarStatistics> {
+    if (this.storage.list) {
+      const entries = await this.storage.list(this.root);
+      return {
+        fileCount: entries.length,
+        totalBytes: entries.reduce((sum, entry) => sum + Math.max(0, entry.size), 0),
+        maxBytes: this.limits.maxTotalBytes,
+      };
+    }
+    const contents = Array.from(this.cache.values()).map((file) => JSON.stringify(file));
+    return {
+      fileCount: contents.length,
+      totalBytes: contents.reduce((sum, content) => sum + utf8ByteLength(content), 0),
+      maxBytes: this.limits.maxTotalBytes,
+    };
+  }
+
+  async clearAll(): Promise<PromptSidecarStatistics> {
+    await Promise.all(Array.from(this.injections.values()).map((value) => value.catch(() => null)));
+    await Promise.all(Array.from(this.writes.values()).map((write) => write.catch(() => undefined)));
+    await this.limitEnforcement.catch(() => undefined);
+    const before = await this.statistics();
+    if (this.storage.clear) {
+      await this.storage.clear(this.root);
+    } else if (this.storage.list && this.storage.remove) {
+      const entries = await this.storage.list(this.root);
+      for (const entry of entries) await this.storage.remove(entry.path);
+    } else {
+      throw new Error("Prompt sidecar storage does not support clearing files.");
+    }
+    this.cache.clear();
+    this.loads.clear();
+    this.writes.clear();
+    this.injections.clear();
+    return before;
   }
 
   async restoreHistory(chatId: string, turns: PromptTurnLike[]): Promise<PromptTurnLike[]> {
@@ -185,28 +353,39 @@ export class PromptSidecarStore {
       );
       const key = turnKey(chatId, canonical.join("\n"));
       const cleanHash = sha256(cleanInput);
+      const injectionKey = chatId + "\u0000" + key;
+      const active = this.injections.get(injectionKey);
+      if (active) return await active;
       const existing = file.records[key];
       if (existing?.clean_content_hash === cleanHash) {
         existing.last_seen_at = this.now();
         return `${cleanInput}${existing.memory_block}`;
       }
 
-      const injected = await inject(cleanInput);
-      if (!injected || !injected.startsWith(cleanInput) || injected === cleanInput) return injected;
-      const record: SidecarRecord = {
-        clean_content_hash: cleanHash,
-        memory_block: injected.slice(cleanInput.length),
-        created_at: this.now(),
-        last_seen_at: this.now(),
-      };
-      file.records[key] = record;
+      const pending = (async (): Promise<string | null> => {
+        const injected = await inject(cleanInput);
+        if (!injected || !injected.startsWith(cleanInput) || injected === cleanInput) return injected;
+        const record: SidecarRecord = {
+          clean_content_hash: cleanHash,
+          memory_block: injected.slice(cleanInput.length),
+          created_at: this.now(),
+          last_seen_at: this.now(),
+        };
+        file.records[key] = record;
+        try {
+          await this.persist(chatId, file, key);
+        } catch (error) {
+          delete file.records[key];
+          throw error;
+        }
+        return injected;
+      })();
+      this.injections.set(injectionKey, pending);
       try {
-        await this.persist(chatId, file);
-      } catch (error) {
-        delete file.records[key];
-        throw error;
+        return await pending;
+      } finally {
+        if (this.injections.get(injectionKey) === pending) this.injections.delete(injectionKey);
       }
-      return injected;
     } catch (error) {
       console.log(`[honcho] prompt sidecar injection failed: ${String(error)}`);
       return null;
@@ -252,6 +431,32 @@ class ToolPkgSidecarStorage implements SidecarStorage {
     if (!exists.exists) return;
     const moved = await Tools.Files.move(path, `${path}.corrupt-${Date.now()}`);
     if (!moved.successful) throw new Error(`Cannot quarantine prompt sidecar: ${moved.details}`);
+  }
+
+  async list(root: string): Promise<SidecarStorageEntry[]> {
+    await this.ensureDirectory();
+    const listing = await Tools.Files.list(root);
+    return listing.entries
+      .filter((entry) => !entry.isDirectory)
+      .map((entry) => ({
+        path: `${root}/${entry.name}`,
+        size: Number(entry.size || 0),
+        lastModified: Date.parse(entry.lastModified) || 0,
+      }));
+  }
+
+  async remove(path: string): Promise<void> {
+    const removed = await Tools.Files.deleteFile(path);
+    if (!removed.successful) throw new Error(`Cannot delete prompt sidecar: ${removed.details}`);
+  }
+
+  async clear(root: string): Promise<void> {
+    const exists = await Tools.Files.exists(root);
+    if (exists.exists) {
+      const removed = await Tools.Files.deleteFile(root, true);
+      if (!removed.successful) throw new Error(`Cannot clear prompt sidecars: ${removed.details}`);
+    }
+    this.directoryReady = false;
   }
 }
 

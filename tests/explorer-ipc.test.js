@@ -62,6 +62,44 @@ class FakeApi {
       ["peer-1", { id: "peer-1", workspace_id: "test", metadata: { owner: "kept", operit_honcho: { display_name: "Peer One", archived: false } } }],
     ]);
     this.peerSessions = new Map([["peer-1", [{ id: "session-1", workspace_id: "test" }]]]);
+    this.conclusions = [
+      {
+        id: "conclusion-1",
+        content: "Duplicate fact",
+        observer_id: "assistant",
+        observed_id: "owner",
+        session_id: "session-1",
+        level: "explicit",
+        created_at: "2026-08-01T01:00:00Z",
+      },
+      {
+        id: "conclusion-2",
+        content: "  Duplicate   fact  ",
+        observer_id: "assistant",
+        observed_id: "owner",
+        session_id: "session-1",
+        level: "explicit",
+        created_at: "2026-08-01T02:00:00Z",
+      },
+      {
+        id: "conclusion-3",
+        content: "Duplicate fact",
+        observer_id: "assistant",
+        observed_id: "owner",
+        session_id: "session-1",
+        level: "explicit",
+        created_at: "2026-08-01T03:00:00Z",
+      },
+      {
+        id: "conclusion-4",
+        content: "Reverse direction",
+        observer_id: "owner",
+        observed_id: "assistant",
+        level: "deductive",
+        created_at: "2026-08-01T04:00:00Z",
+      },
+    ];
+    this.conclusionDeleteErrors = new Map();
   }
 
   async getWorkspaceIdentityReadOnly() {
@@ -135,9 +173,38 @@ class FakeApi {
     return emptyPage(size);
   }
 
-  async listConclusionsGeneric(workspace, page, size, reverse) {
-    this.calls.push(["conclusions", workspace, page, size, reverse]);
-    return emptyPage(size);
+  async listConclusionsGeneric(workspace, page, size, reverse, filters) {
+    this.calls.push(["conclusions", workspace, page, size, reverse, filters]);
+    let items = this.conclusions.map((item) => ({ ...item }));
+    for (const [key, value] of Object.entries(filters || {})) {
+      items = items.filter((item) => item[key] === value);
+    }
+    const start = (page - 1) * size;
+    return {
+      items: items.slice(start, start + size),
+      total: items.length,
+      page,
+      size,
+      pages: items.length ? Math.ceil(items.length / size) : 0,
+    };
+  }
+
+  async queryConclusionsGeneric(workspace, query, topK, filters) {
+    this.calls.push(["query_conclusions", workspace, query, topK, filters]);
+    let items = this.conclusions.filter((item) =>
+      item.content.toLowerCase().includes(String(query).toLowerCase())
+    );
+    for (const [key, value] of Object.entries(filters || {})) {
+      items = items.filter((item) => item[key] === value);
+    }
+    return items.slice(0, topK).map((item) => ({ ...item }));
+  }
+
+  async deleteConclusionFor(workspace, id) {
+    this.calls.push(["delete_conclusion", workspace, id]);
+    const failure = this.conclusionDeleteErrors.get(id);
+    if (failure) throw failure;
+    this.conclusions = this.conclusions.filter((item) => item.id !== id);
   }
 
   async getQueueStatus(workspace) {
@@ -193,6 +260,30 @@ test("Explorer request validation enforces operation allowlist and bounded pagin
       params: { peerMutation: "set_archived", peerId: "peer-1", archived: "false" },
     }),
     /archived must be a boolean/
+  );
+  assert.throws(
+    () => parseExplorerRequest({
+      op: "list_conclusions",
+      requestId: "1",
+      params: { conclusionLevel: "unknown" },
+    }),
+    /Unknown conclusionLevel/
+  );
+  assert.throws(
+    () => parseExplorerRequest({
+      op: "prepare_conclusion_cleanup",
+      requestId: "1",
+      params: { keepConclusionId: "same", deleteConclusionIds: ["same"] },
+    }),
+    /cannot also be deleted/
+  );
+  assert.throws(
+    () => parseExplorerRequest({
+      op: "commit_sidecar_clear",
+      requestId: "1",
+      params: {},
+    }),
+    /confirmation token is required/i
   );
 });
 
@@ -513,4 +604,192 @@ test("Explorer maps scoped-key failures to structured IPC errors", async () => {
     { code: response.error.code, status: response.error.status, retryable: response.error.retryable },
     { code: "PERMISSION_DENIED", status: 403, retryable: false }
   );
+});
+
+test("Explorer Conclusion reads map filters, semantic queries, and Peer display names", async () => {
+  const fakeApi = new FakeApi();
+  const service = new ExplorerService(
+    { getConfig: () => config(), status: () => status() },
+    () => fakeApi
+  );
+  const filters = {
+    observerPeerId: "assistant",
+    targetPeerId: "owner",
+    sessionId: "session-1",
+    conclusionLevel: "explicit",
+  };
+  const listed = await service.handle({
+    op: "list_conclusions",
+    requestId: "conclusion-list",
+    workspaceId: "test",
+    params: filters,
+  });
+  assert.equal(listed.ok, true);
+  assert.equal(listed.data.total, 3);
+  assert.equal(listed.data.items[0].observer_display_name, "Assistant");
+  assert.equal(listed.data.items[0].observed_display_name, "Owner");
+  assert.ok(fakeApi.calls.some((call) => call[0] === "conclusions"
+    && JSON.stringify(call[5]) === JSON.stringify({
+      observer_id: "assistant",
+      observed_id: "owner",
+      session_id: "session-1",
+      level: "explicit",
+    })));
+
+  const queried = await service.handle({
+    op: "list_conclusions",
+    requestId: "conclusion-query",
+    workspaceId: "test",
+    params: { ...filters, query: "duplicate", size: 2 },
+  });
+  assert.equal(queried.ok, true);
+  assert.equal(queried.data.items.length, 2);
+  assert.equal(queried.data.page, 1);
+  assert.ok(fakeApi.calls.some((call) => call[0] === "query_conclusions"
+    && call[2] === "duplicate"
+    && call[3] === 2));
+});
+
+test("Explorer Conclusion cleanup is filter-bound, single-use, and reports partial failure", async () => {
+  const fakeApi = new FakeApi();
+  fakeApi.conclusionDeleteErrors.set("conclusion-3", new HonchoHttpError(503, "temporary"));
+  const service = new ExplorerService(
+    { getConfig: () => config(), status: () => status() },
+    () => fakeApi
+  );
+  const filters = {
+    observerPeerId: "assistant",
+    targetPeerId: "owner",
+    sessionId: "session-1",
+    conclusionLevel: "explicit",
+  };
+  const report = await service.handle({
+    op: "scan_conclusion_duplicates",
+    requestId: "scan",
+    workspaceId: "test",
+    params: filters,
+  });
+  assert.equal(report.ok, true);
+  assert.equal(report.data.scanned_count, 3);
+  assert.equal(report.data.duplicate_count, 2);
+  assert.equal(report.data.groups[0].earliest_id, "conclusion-1");
+  assert.equal(report.data.groups[0].latest_id, "conclusion-3");
+
+  const prepared = await service.handle({
+    op: "prepare_conclusion_cleanup",
+    requestId: "prepare-cleanup",
+    workspaceId: "test",
+    params: {
+      ...filters,
+      keepConclusionId: "conclusion-1",
+      deleteConclusionIds: ["conclusion-2", "conclusion-3"],
+    },
+  });
+  assert.equal(prepared.ok, true);
+  assert.equal(prepared.data.confirmation_phrase, "DELETE 2");
+
+  const mistyped = await service.handle({
+    op: "commit_conclusion_cleanup",
+    requestId: "mistyped-cleanup",
+    workspaceId: "test",
+    params: {
+      keepConclusionId: "conclusion-1",
+      deleteConclusionIds: ["conclusion-2", "conclusion-3"],
+      confirmationToken: prepared.data.confirmation_token,
+      confirmationText: "DELETE 1",
+    },
+  });
+  assert.equal(mistyped.ok, false);
+  assert.equal(mistyped.error.code, "CONFIRMATION_TEXT_MISMATCH");
+
+  const committed = await service.handle({
+    op: "commit_conclusion_cleanup",
+    requestId: "commit-cleanup",
+    workspaceId: "test",
+    params: {
+      keepConclusionId: "conclusion-1",
+      deleteConclusionIds: ["conclusion-2", "conclusion-3"],
+      confirmationToken: prepared.data.confirmation_token,
+      confirmationText: "DELETE 2",
+    },
+  });
+  assert.equal(committed.ok, true);
+  assert.deepEqual(committed.data.deleted_ids, ["conclusion-2"]);
+  assert.equal(committed.data.failures.length, 1);
+  assert.equal(committed.data.failures[0].id, "conclusion-3");
+  assert.ok(fakeApi.conclusions.some((item) => item.id === "conclusion-1"));
+
+  const reused = await service.handle({
+    op: "commit_conclusion_cleanup",
+    requestId: "reuse-cleanup",
+    workspaceId: "test",
+    params: {
+      keepConclusionId: "conclusion-1",
+      deleteConclusionIds: ["conclusion-2", "conclusion-3"],
+      confirmationToken: prepared.data.confirmation_token,
+      confirmationText: "DELETE 2",
+    },
+  });
+  assert.equal(reused.ok, false);
+  assert.equal(reused.error.code, "CONFIRMATION_REQUIRED");
+});
+
+test("Explorer read cache coalesces matching requests and honors forceRefresh", async () => {
+  const fakeApi = new FakeApi();
+  const service = new ExplorerService(
+    { getConfig: () => config(), status: () => status() },
+    () => fakeApi
+  );
+  await Promise.all([
+    service.handle({ op: "list_sessions", requestId: "sessions-a", params: { page: 1 } }),
+    service.handle({ op: "list_sessions", requestId: "sessions-b", params: { page: 1 } }),
+  ]);
+  await service.handle({ op: "list_sessions", requestId: "sessions-c", params: { page: 1 } });
+  await service.handle({
+    op: "list_sessions",
+    requestId: "sessions-refresh",
+    params: { page: 1, forceRefresh: true },
+  });
+  assert.equal(fakeApi.calls.filter((call) => call[0] === "sessions").length, 2);
+});
+
+test("Explorer sidecar maintenance requires a stable typed confirmation", async () => {
+  const fakeApi = new FakeApi();
+  let current = { file_count: 3, total_bytes: 2048, max_bytes: 8192 };
+  const maintenance = {
+    status: async () => ({ ...current }),
+    clear: async () => {
+      const result = { deleted_files: current.file_count, deleted_bytes: current.total_bytes };
+      current = { ...current, file_count: 0, total_bytes: 0 };
+      return result;
+    },
+  };
+  const service = new ExplorerService(
+    { getConfig: () => config(), status: () => status() },
+    () => fakeApi,
+    maintenance
+  );
+  const statusResult = await service.handle({ op: "sidecar_status", requestId: "sidecar-status" });
+  assert.equal(statusResult.ok, true);
+  assert.equal(statusResult.data.total_bytes, 2048);
+  const prepared = await service.handle({ op: "prepare_sidecar_clear", requestId: "sidecar-prepare" });
+  assert.equal(prepared.data.confirmation_phrase, "CLEAR SIDECARS");
+  const cleared = await service.handle({
+    op: "commit_sidecar_clear",
+    requestId: "sidecar-clear",
+    params: {
+      confirmationToken: prepared.data.confirmation_token,
+      confirmationText: "CLEAR SIDECARS",
+    },
+  });
+  assert.equal(cleared.ok, true);
+  assert.deepEqual(cleared.data, { deleted_files: 3, deleted_bytes: 2048 });
+
+  const unavailable = new ExplorerService(
+    { getConfig: () => config(), status: () => status() },
+    () => fakeApi
+  );
+  const missing = await unavailable.handle({ op: "sidecar_status", requestId: "sidecar-missing" });
+  assert.equal(missing.ok, false);
+  assert.equal(missing.error.code, "SIDECAR_UNAVAILABLE");
 });
