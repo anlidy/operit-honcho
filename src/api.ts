@@ -305,7 +305,7 @@ export class HonchoApi {
     const limit = Math.max(3, Math.min(20, Math.floor(charBudget / 300)));
     const messages = await this.request<HonchoMessage[]>("POST", this.workspacePath("/search"), {
       query: clipQuery(query, 4000),
-      filters: { peer_perspective: peerId },
+      filters: { peer_id: peerId },
       limit,
     });
     const lines: string[] = [];

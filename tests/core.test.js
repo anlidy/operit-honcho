@@ -82,6 +82,19 @@ test("REST client initializes resources, chunks messages, and maps context", asy
         content: JSON.stringify({ representation: "assistant representation", peer_card: ["helpful"] }),
       };
     }
+    if (request.method === "POST" && request.url.endsWith("/search")) {
+      return {
+        statusCode: 200,
+        content: JSON.stringify([
+          {
+            id: "message-1",
+            content: "matching memory",
+            peer_id: "custom_peer",
+            session_id: "session-1",
+          },
+        ]),
+      };
+    }
     return { statusCode: 200, content: "{}" };
   };
 
@@ -101,6 +114,11 @@ test("REST client initializes resources, chunks messages, and maps context", asy
 
   await api.getProfile("custom peer");
   assert.ok(requests.some((request) => request.method === "POST" && request.body?.id === "custom_peer"));
+
+  const searchResult = await api.search("memory query", 400, "custom peer");
+  const searchRequest = requests.find((request) => request.url.endsWith("/search"));
+  assert.deepEqual(searchRequest.body.filters, { peer_id: "custom_peer" });
+  assert.match(searchResult, /\[custom_peer · session-1\] matching memory/);
 });
 
 class FakeApi {
