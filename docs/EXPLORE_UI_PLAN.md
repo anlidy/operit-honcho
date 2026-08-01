@@ -1,6 +1,6 @@
 # Operit Honcho Explore 侧边栏实施计划
 
-状态：**计划中，尚未实现 UI 运行时代码**。
+状态：**Phase 1 只读基础链路已实现；真实 `test` Workspace 与视觉验收待完成**。
 
 本文规划在现有 `com.operit.honcho` ToolPkg 内增加 Operit 主侧边栏 Explore 面板，目标是在移动端可用的 Compose DSL 界面中复现 Honcho 官方 Explore 的核心管理和诊断能力。
 

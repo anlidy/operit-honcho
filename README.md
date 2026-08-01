@@ -12,6 +12,8 @@ Operit ToolPkg integration for [Honcho v3](https://honcho.dev), modeled after th
 - Retries failed writes once, retains unsent messages in memory, deduplicates hook replays, and flushes on application termination.
 - Fails open: Honcho outages never block the original Operit conversation.
 - Supports Honcho Cloud and unauthenticated self-hosted deployments.
+- Adds a compact read-only `Honcho Explore` main-sidebar panel for Workspace, Peer, Session, Message, Conclusion, queue, and local write status.
+- Uses a fixed, validated IPC operation allowlist so the UI never receives the API key or constructs Honcho HTTP requests.
 
 ## Documentation
 
@@ -90,7 +92,9 @@ A configured API key or explicit base URL enables the integration automatically 
 
 ## Architecture
 
-- `src/main.ts`: ToolPkg hook registration and fail-open integration.
+- `src/main.ts`: ToolPkg hook, Explorer IPC, Compose UI route, and sidebar registration.
+- `src/explorer/`: validated read-only Explorer operations, DTOs, error mapping, and API dispatch.
+- `src/ui/honcho_explore/`: compact Compose DSL views for status and paged entity browsing.
 - `src/controller.ts`: per-chat state, context cadence, deduplication, write queue, retry, and tool dispatch.
 - `src/api.ts`: dependency-free Honcho v3 REST client.
 - `src/packages/honcho.ts`: ToolPkg `METADATA` and five tool exports.

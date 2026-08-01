@@ -222,10 +222,18 @@ test("ToolPkg main registers all hooks and emits a static mode header", () => {
   configure();
   const registered = {};
   global.ToolPkg = {
+    registerUiRoute: (definition) => { registered.ui = definition; },
+    registerNavigationEntry: (definition) => { registered.navigation = definition; },
     registerChatMessageHook: (definition) => { registered.chat = definition; },
     registerSystemPromptComposeHook: (definition) => { registered.system = definition; },
     registerPromptFinalizeHook: (definition) => { registered.finalize = definition; },
     registerAppLifecycleHook: (definition) => { registered.lifecycle = definition; },
+    ipc: {
+      on: (channel, handler) => {
+        registered.ipc = { channel, handler };
+        return () => {};
+      },
+    },
   };
 
   const main = require("../dist/main");
@@ -233,6 +241,11 @@ test("ToolPkg main registers all hooks and emits a static mode header", () => {
   assert.equal(registered.chat.id, "honcho_message_persisted");
   assert.equal(registered.finalize.id, "honcho_memory_context");
   assert.equal(registered.lifecycle.event, "application_on_terminate");
+  assert.equal(registered.ipc.channel, "honcho.explorer.request");
+  assert.equal(registered.ui.id, "honcho_explore");
+  assert.equal(registered.ui.runtime, "compose_dsl");
+  assert.equal(registered.navigation.surface, "main_sidebar_plugins");
+  assert.equal(registered.navigation.route, registered.ui.route);
 
   const result = registered.system.function({
     eventName: "after_compose_system_prompt",

@@ -1,4 +1,11 @@
+import { ExplorerService } from "./explorer/service";
+import { ExplorerResponse } from "./explorer/types";
 import { honchoController } from "./runtime";
+import honchoExploreScreen from "./ui/honcho_explore/index.ui.js";
+
+const HONCHO_EXPLORE_ROUTE = "toolpkg:com.operit.honcho:ui:honcho_explore";
+const explorerService = new ExplorerService(honchoController);
+let unregisterExplorerIpc: (() => void) | null = null;
 
 function isChatPrompt(payload: ToolPkg.PromptHookEventPayload): boolean {
   const value = String(payload.promptFunctionType || payload.functionType || "CHAT").toUpperCase();
@@ -6,6 +13,24 @@ function isChatPrompt(payload: ToolPkg.PromptHookEventPayload): boolean {
 }
 
 export function registerToolPkg(): boolean {
+  if (unregisterExplorerIpc) unregisterExplorerIpc();
+  unregisterExplorerIpc = ToolPkg.ipc.on("honcho.explorer.request", onExplorerRequest);
+  ToolPkg.registerUiRoute({
+    id: "honcho_explore",
+    route: HONCHO_EXPLORE_ROUTE,
+    runtime: "compose_dsl",
+    screen: honchoExploreScreen,
+    keepAlive: true,
+    title: { zh: "Honcho Explore", en: "Honcho Explore" },
+  });
+  ToolPkg.registerNavigationEntry({
+    id: "honcho_explore_sidebar",
+    route: HONCHO_EXPLORE_ROUTE,
+    surface: "main_sidebar_plugins",
+    title: { zh: "Honcho Explore", en: "Honcho Explore" },
+    icon: "database",
+    order: 220,
+  });
   ToolPkg.registerChatMessageHook({
     id: "honcho_message_persisted",
     function: onChatMessage,
@@ -24,6 +49,10 @@ export function registerToolPkg(): boolean {
     function: onApplicationTerminate,
   });
   return true;
+}
+
+export async function onExplorerRequest(payload: unknown): Promise<ExplorerResponse> {
+  return explorerService.handle(payload);
 }
 
 export function onChatMessage(event: ToolPkg.ChatMessageHookEvent): null {

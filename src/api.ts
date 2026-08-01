@@ -22,7 +22,50 @@ export interface HonchoMessage {
   content?: string;
   peer_id?: string;
   session_id?: string;
+  workspace_id?: string;
+  metadata?: JsonRecord;
+  token_count?: number;
   created_at?: string;
+}
+
+export interface HonchoWorkspace {
+  id: string;
+  metadata?: JsonRecord;
+  configuration?: JsonRecord;
+  created_at?: string;
+}
+
+export interface HonchoPeer {
+  id: string;
+  workspace_id?: string;
+  metadata?: JsonRecord;
+  configuration?: JsonRecord;
+  created_at?: string;
+}
+
+export interface HonchoSession {
+  id: string;
+  workspace_id?: string;
+  is_active?: boolean;
+  metadata?: JsonRecord;
+  configuration?: JsonRecord;
+  created_at?: string;
+}
+
+export interface HonchoPage<T> {
+  items: T[];
+  total: number;
+  page: number;
+  size: number;
+  pages: number;
+}
+
+export interface HonchoQueueStatus {
+  total_work_units: number;
+  completed_work_units: number;
+  in_progress_work_units: number;
+  pending_work_units: number;
+  sessions?: JsonRecord | null;
 }
 
 export interface Conclusion {
@@ -31,7 +74,19 @@ export interface Conclusion {
   observer_id?: string;
   observed_id?: string;
   session_id?: string | null;
+  level?: "explicit" | "deductive" | "inductive" | "contradiction";
   created_at?: string;
+}
+
+export class HonchoHttpError extends Error {
+  constructor(
+    readonly status: number,
+    readonly responseBody: string
+  ) {
+    const detail = responseBody ? `: ${responseBody.slice(0, 1000)}` : "";
+    super(`Honcho HTTP ${status}${detail}`);
+    this.name = "HonchoHttpError";
+  }
 }
 
 export async function operitHttpTransport(request: HttpRequest): Promise<HttpResponse> {
@@ -92,6 +147,29 @@ function clipQuery(value: string, maxChars: number): string {
   return input.length <= maxChars ? input : input.slice(0, maxChars);
 }
 
+function parsePage<T>(value: unknown): HonchoPage<T> {
+  const page = asRecord(value);
+  const number = (key: string, fallback: number): number => {
+    const parsed = Number(page[key]);
+    return Number.isFinite(parsed) ? Math.max(0, Math.trunc(parsed)) : fallback;
+  };
+  return {
+    items: Array.isArray(page.items) ? (page.items as T[]) : [],
+    total: number("total", 0),
+    page: Math.max(1, number("page", 1)),
+    size: Math.max(1, number("size", 20)),
+    pages: number("pages", 0),
+  };
+}
+
+function pageParams(page: number, size: number, reverse: boolean): Record<string, unknown> {
+  return {
+    page: Math.max(1, Math.trunc(page)),
+    size: Math.max(1, Math.min(100, Math.trunc(size))),
+    reverse,
+  };
+}
+
 export class HonchoApi {
   private readonly workspaceId: string;
   private readonly userPeerId: string;
@@ -130,8 +208,7 @@ export class HonchoApi {
       body,
     });
     if (response.statusCode < 200 || response.statusCode >= 300) {
-      const detail = response.content ? `: ${response.content.slice(0, 1000)}` : "";
-      throw new Error(`Honcho HTTP ${response.statusCode}${detail}`);
+      throw new HonchoHttpError(response.statusCode, response.content || "");
     }
     if (!response.content.trim()) return undefined as T;
     try {
@@ -142,7 +219,90 @@ export class HonchoApi {
   }
 
   private workspacePath(path = ""): string {
-    return `/v3/workspaces/${encodeURIComponent(this.workspaceId)}${path}`;
+    return this.workspacePathFor(this.workspaceId, path);
+  }
+
+  private workspacePathFor(workspaceId: string, path = ""): string {
+    return `/v3/workspaces/${encodeURIComponent(String(workspaceId).trim())}${path}`;
+  }
+
+  async listWorkspaces(page = 1, size = 20, reverse = false): Promise<HonchoPage<HonchoWorkspace>> {
+    const result = await this.request<unknown>(
+      "POST",
+      `/v3/workspaces/list${queryString(pageParams(page, size, reverse))}`,
+      {}
+    );
+    return parsePage<HonchoWorkspace>(result);
+  }
+
+  async listPeers(
+    workspaceId: string,
+    page = 1,
+    size = 20,
+    reverse = true
+  ): Promise<HonchoPage<HonchoPeer>> {
+    const result = await this.request<unknown>(
+      "POST",
+      `${this.workspacePathFor(workspaceId, "/peers/list")}${queryString(pageParams(page, size, reverse))}`,
+      {}
+    );
+    return parsePage<HonchoPeer>(result);
+  }
+
+  async listSessions(
+    workspaceId: string,
+    page = 1,
+    size = 20,
+    reverse = true
+  ): Promise<HonchoPage<HonchoSession>> {
+    const result = await this.request<unknown>(
+      "POST",
+      `${this.workspacePathFor(workspaceId, "/sessions/list")}${queryString(pageParams(page, size, reverse))}`,
+      {}
+    );
+    return parsePage<HonchoSession>(result);
+  }
+
+  async listMessages(
+    workspaceId: string,
+    sessionId: string,
+    page = 1,
+    size = 30,
+    reverse = false
+  ): Promise<HonchoPage<HonchoMessage>> {
+    const path = this.workspacePathFor(
+      workspaceId,
+      `/sessions/${encodeURIComponent(String(sessionId).trim())}/messages/list`
+    );
+    const result = await this.request<unknown>(
+      "POST",
+      `${path}${queryString(pageParams(page, size, reverse))}`,
+      {}
+    );
+    return parsePage<HonchoMessage>(result);
+  }
+
+  async listConclusionsGeneric(
+    workspaceId: string,
+    page = 1,
+    size = 20,
+    reverse = false
+  ): Promise<HonchoPage<Conclusion>> {
+    const result = await this.request<unknown>(
+      "POST",
+      `${this.workspacePathFor(workspaceId, "/conclusions/list")}${queryString(
+        pageParams(page, size, reverse)
+      )}`,
+      {}
+    );
+    return parsePage<Conclusion>(result);
+  }
+
+  async getQueueStatus(workspaceId: string): Promise<HonchoQueueStatus> {
+    return this.request<HonchoQueueStatus>(
+      "GET",
+      this.workspacePathFor(workspaceId, "/queue/status")
+    );
   }
 
   private observationPeers(): JsonRecord {
@@ -398,6 +558,8 @@ export class HonchoApi {
       user_peer: this.userPeerId,
       ai_peer: this.aiPeerId,
       recall_mode: this.config.recallMode,
+      observation_mode: this.config.observationMode,
+      session_strategy: this.config.sessionStrategy,
       save_messages: this.config.saveMessages,
       api_key_set: Boolean(this.config.apiKey),
     };

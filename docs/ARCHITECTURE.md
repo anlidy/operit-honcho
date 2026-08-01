@@ -23,6 +23,8 @@
 - `hybrid` 模式会自动注入上下文，同时保留五个显式工具。
 - `context` 模式只自动注入上下文。
 - `tools` 模式不自动请求上下文，只在工具调用时访问 Honcho。
+- 在主侧边栏打开 `Honcho Explore`，只读浏览 Workspace、Peer、Session、Message 和 Conclusion。
+- 查看 Honcho 服务端队列、本地待写消息和最近写入错误；Explorer 网络请求通过 main IPC 执行，UI 不接触 API Key。
 - 网络错误只写日志并保留有限的进程内重试状态，不阻塞聊天。
 
 自动注入块使用 `<memory-context>` 包裹，不修改已经持久化的聊天消息。系统提示词只追加一个稳定、短小的模式标记，避免频繁破坏提示词缓存。
@@ -122,6 +124,20 @@ operit-honcho/
 | System Prompt Compose | `after_compose_system_prompt` | 追加稳定的模式标记 |
 | Prompt Finalize | `before_send_to_model` | 向本次用户输入注入记忆上下文 |
 | App Lifecycle | `application_on_terminate` | 尝试 flush 未完成写入 |
+
+`src/main.ts` 还注册 `honcho.explorer.request` IPC、`compose_dsl` UI route 和 `main_sidebar_plugins` 导航入口。Explorer UI 通过固定只读 operation allowlist 请求 Workspace、Peer、Session、Message、Conclusion 和队列状态；API Key 只在 main 上下文使用。
+
+### `src/explorer/`
+
+- 定义 Explorer IPC request/response 与分页 DTO。
+- 校验 operation、Workspace/Session ID、分页范围和排序参数。
+- 将只读请求分发到 `HonchoApi`，并结构化映射认证、权限、缺失、限流和服务端错误。
+
+### `src/ui/honcho_explore/`
+
+- 提供 Overview、Peers、Sessions 和 Conclusions 顶层视图。
+- 点击 Session 后显示服务端分页的 Message 时间线，支持返回、刷新、重试和翻页。
+- 区分 Hook 活跃 Workspace 与 UI 浏览 Workspace，不写回 `HONCHO_WORKSPACE`。
 
 ### `src/packages/honcho.ts`
 
@@ -281,6 +297,4 @@ build/operit-honcho-0.1.0.toolpkg
 
 ## 10. 当前边界
 
-当前版本还没有可视化数据管理界面。Workspace、Peer、Session、Message 和 Conclusion 的浏览仍依赖工具、API 或 Honcho 官方 Dashboard。
-
-下一阶段将在同一个 ToolPkg 内新增 Operit 主侧边栏 Explore UI。它会复用现有配置和 REST 客户端，通过 IPC 从 main 获取数据，避免复制鉴权和状态逻辑。详细设计、阶段和验收标准见 [EXPLORE_UI_PLAN.md](./EXPLORE_UI_PLAN.md)。
+Phase 1 的只读基础链路已实现：同一 ToolPkg 现在包含 Explorer DTO、分页 API、受控 IPC、主侧边栏入口，以及 Workspace、Peer、Session、Message 和 Conclusion 浏览。真实 `test` Workspace 端到端与多尺寸截图验收仍待在已配置 API Key 的 Operit 环境完成；详情见 [EXPLORE_UI_PLAN.md](./EXPLORE_UI_PLAN.md)。

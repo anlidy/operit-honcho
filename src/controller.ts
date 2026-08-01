@@ -268,18 +268,29 @@ export class HonchoController {
     await Promise.all(Array.from(this.chats.keys()).map((chatId) => this.flushChat(chatId)));
   }
 
+  status(): JsonRecord {
+    this.refreshConfig();
+    const states = Array.from(this.chats.values());
+    const pending = states.reduce((sum, state) => sum + state.pending.length, 0);
+    const writing = states.filter((state) => state.flushPromise !== null).length;
+    const lastWriteError = states.map((state) => state.lastWriteError).find(Boolean) || "";
+    return {
+      ...this.api.status(),
+      pending_messages: pending,
+      active_writes: writing,
+      last_write_error: lastWriteError,
+    };
+  }
+
   async call(operation: string, params: JsonRecord): Promise<JsonRecord> {
     const config = this.refreshConfig();
+    if (operation === "status") return this.status();
     if (!isConfigured(config)) {
       throw new Error("Honcho is not configured. Set HONCHO_API_KEY, or HONCHO_BASE_URL for self-hosting, and enable the package.");
     }
     const chatId = String(params.chatId || params.chat_id || "default");
     const peer = String(params.peer || "user");
 
-    if (operation === "status") {
-      const queue = Array.from(this.chats.values()).reduce((sum, state) => sum + state.pending.length, 0);
-      return { ...this.api.status(), pending_messages: queue };
-    }
     if (operation === "profile") {
       const card = Array.isArray(params.card) ? params.card.map(String) : null;
       const result = card ? await this.api.setProfile(card, peer) : await this.api.getProfile(peer);
