@@ -19,6 +19,7 @@ Operit ToolPkg integration for [Honcho v3](https://honcho.dev), modeled after th
 
 - [Architecture](docs/ARCHITECTURE.md): current modules, data model, hooks, persistence, recall, tools, configuration, and failure behavior.
 - [Explore UI plan](docs/EXPLORE_UI_PLAN.md): Operit sidebar information architecture, Honcho Dashboard feature mapping, IPC/API design, delivery phases, and acceptance criteria.
+- [Explore remediation plan](docs/EXPLORER_REMEDIATION_PLAN.md): duplicate prevention, message upload boundaries, prompt-cache sidecars, Peer identity management, filtering, timezone, performance, migration, and acceptance criteria for the verified device issues.
 - [Agent guide](AGENTS.md): repository-specific implementation, testing, security, and release rules.
 
 ## Tools
